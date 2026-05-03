@@ -1,0 +1,14 @@
+services:
+  papermate:
+    build: .
+    container_name: papermate
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${PAPERMATE_HOST_PORT:-8501}:8501"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      PYTHONUNBUFFERED: "1"
