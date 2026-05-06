@@ -105,6 +105,8 @@ class RAGPipeline:
                 retrieval_debug["latency_ms"] = _latency_ms(start_time)
                 return empty_answer(retrieval_debug=retrieval_debug, qa_id=qa_id)
 
+            # Citations are derived from retrieved chunk metadata before the LLM
+            # call; the model can reference [片段X] but does not invent sources.
             context_text, citations = self._build_context(final_results)
             retrieval_debug["context_chunks"] = len(citations)
             retrieval_debug["context_chars"] = len(context_text)

@@ -57,6 +57,8 @@ def parse_pdf_with_mineru(file_path: str | Path, paper_id: str) -> dict[str, Any
     mineru_result = MinerUClient().pdf_to_markdown(path, paper_id, file_name=path.name)
 
     content_list = mineru_result.get("content_list")
+    # MinerU's content_list preserves page-level structure; if it is missing,
+    # fall back to a single Markdown-derived page so indexing can still proceed.
     pages = pages_from_content_list(content_list) if content_list else []
     if not pages:
         pages = pages_from_markdown(mineru_result["markdown"])

@@ -72,6 +72,8 @@ def save_feedback(
         bad_case_id: int | None = None
 
         if is_negative:
+            # Negative feedback is duplicated into bad_cases so it can be triaged
+            # without filtering the raw feedback table every time.
             bad_case_cursor = connection.execute(
                 """
                 INSERT INTO bad_cases (

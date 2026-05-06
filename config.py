@@ -126,11 +126,28 @@ class Settings:
 
     # Embedding
     embedding_provider: str = normalize_provider(
-        env_value("EMBEDDING_PROVIDER", "openai_compatible")
+        env_value("EMBEDDING_PROVIDER", "zhipu")
     )
-    embedding_api_key: str = env_value("EMBEDDING_API_KEY", env_value("OPENAI_API_KEY"))
-    embedding_base_url: str = env_value("EMBEDDING_BASE_URL", env_value("OPENAI_BASE_URL"))
-    embedding_model: str = env_value("EMBEDDING_MODEL", "text-embedding-3-small")
+    embedding_api_key: str = first_env(
+        (
+            "EMBEDDING_API_KEY",
+            "ZHIPU_API_KEY",
+            "ZHIPUAI_API_KEY",
+            "BIGMODEL_API_KEY",
+            "OPENAI_API_KEY",
+        )
+    )
+    embedding_base_url: str = first_env(
+        (
+            "EMBEDDING_BASE_URL",
+            "ZHIPU_BASE_URL",
+            "BIGMODEL_BASE_URL",
+            "OPENAI_BASE_URL",
+        ),
+        "https://open.bigmodel.cn/api/paas/v4",
+    )
+    embedding_model: str = env_value("EMBEDDING_MODEL", "embedding-3")
+    embedding_dimensions: int = env_int("EMBEDDING_DIMENSIONS", 2048)
 
     # RAG retrieval
     vector_top_k: int = env_int("VECTOR_TOP_K", 20)

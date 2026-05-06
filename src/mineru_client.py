@@ -217,6 +217,8 @@ class MinerUClient:
 
         if zip_url:
             try:
+                # Prefer the full zip because it carries Markdown, content_list,
+                # and images together; direct md_url is only a text fallback.
                 markdown, content_list, images = self.download_zip_outputs(str(zip_url), output_dir)
             except MinerUError:
                 if not md_url:
@@ -240,6 +242,8 @@ class MinerUClient:
             raise MinerUError(ErrorCode.MINERU_NO_MARKDOWN)
 
         if images:
+            # Streamlit cannot safely preview arbitrary local image paths inside
+            # Markdown, so the saved images are exposed as data URI links.
             markdown = self.replace_markdown_images_with_links(markdown, images)
 
         markdown_path = output_dir / "full.md"

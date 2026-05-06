@@ -42,6 +42,7 @@ def build_context(
 
         context_parts.append(snippet)
         current_len += len(candidate)
+        # The UI trusts this citation list, not model-written source text.
         citations.append(
             {
                 "citation_id": citation_id,

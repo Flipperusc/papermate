@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from config import settings
-from src.embedding_client import EmbeddingClient
+from src.embedding_client import EmbeddingClient, ZHIPU_PROVIDERS
 from src.errors import ErrorCode, VectorStoreError
 
 
@@ -15,8 +16,13 @@ COLLECTION_NAME = "papermate_chunks"
 class VectorStore:
     """Persistent Chroma vector store for paper chunks."""
 
-    def __init__(self, embedding_client: EmbeddingClient | None = None) -> None:
+    def __init__(
+        self,
+        embedding_client: EmbeddingClient | None = None,
+        collection_name: str | None = None,
+    ) -> None:
         self.embedding_client = embedding_client or EmbeddingClient()
+        self.collection_name = collection_name or collection_name_for_embedding(self.embedding_client)
 
         try:
             import chromadb
@@ -30,7 +36,7 @@ class VectorStore:
             settings.chroma_dir.mkdir(parents=True, exist_ok=True)
             self.client = chromadb.PersistentClient(path=str(settings.chroma_dir))
             self.collection = self.client.get_or_create_collection(
-                name=COLLECTION_NAME,
+                name=self.collection_name,
                 metadata={"hnsw:space": "cosine"},
             )
         except Exception as exc:
@@ -49,6 +55,8 @@ class VectorStore:
                 "paper_id": str(chunk["paper_id"]),
                 "page_num": int(chunk["page_num"]),
                 "section_title": str(chunk.get("section_title") or ""),
+                # Keep text in metadata as well as documents so citation display
+                # remains stable across Chroma include/document behavior changes.
                 "text": str(chunk["text"]),
             }
             for chunk in chunks
@@ -130,3 +138,12 @@ class VectorStore:
             )
 
         return matches
+
+
+def collection_name_for_embedding(embedding_client: EmbeddingClient) -> str:
+    """Return a Chroma collection name that avoids cross-provider dimension conflicts."""
+    if embedding_client.provider not in ZHIPU_PROVIDERS:
+        return COLLECTION_NAME
+
+    suffix = re.sub(r"[^A-Za-z0-9._-]+", "_", embedding_client.identity()).strip("._-")
+    return f"{COLLECTION_NAME}_{suffix}"[:63]

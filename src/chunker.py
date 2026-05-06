@@ -386,6 +386,8 @@ def chunk_pages(
                     {
                         "page_num": page_num,
                         "section_title": current_section,
+                        # Force a chunk boundary at real section starts so
+                        # retrieval snippets keep paper structure visible.
                         "section_start": next_unit_starts_section,
                         "text": text_part,
                     }

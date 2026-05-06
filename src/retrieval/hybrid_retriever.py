@@ -45,6 +45,8 @@ class HybridRetriever:
         expanded_query = expand_query(question)
         weights = get_rrf_weights(query_type)
 
+        # Search failures are captured per channel so vector-only or BM25-only
+        # retrieval can still answer when the other index is unavailable.
         vector_results, vector_error = self._safe_vector_search(paper_id, question)
         bm25_results, bm25_error = self._safe_bm25_search(paper_id, expanded_query)
 

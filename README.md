@@ -96,13 +96,14 @@ DEEPSEEK_API_KEY=your_deepseek_api_key
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-pro
 
-EMBEDDING_PROVIDER=openai_compatible
-EMBEDDING_API_KEY=your_embedding_api_key
-EMBEDDING_BASE_URL=https://api.openai.com/v1
-EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_PROVIDER=zhipu
+EMBEDDING_API_KEY=your_zhipu_api_key
+EMBEDDING_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+EMBEDDING_MODEL=embedding-3
+EMBEDDING_DIMENSIONS=2048
 ```
 
-注意：DeepSeek 只用于最终回答，Embedding 仍走 `src/embedding_client.py` 中的 OpenAI-compatible Embedding API。不要把 DeepSeek 配成 Embedding 服务。
+注意：DeepSeek 只用于最终回答，Embedding 默认走 `src/embedding_client.py` 中的智谱 BigModel `embedding-3`。不要把 DeepSeek 配成 Embedding 服务。切换 Embedding 模型后，需要重新构建论文索引。
 
 ## MinerU 配置
 

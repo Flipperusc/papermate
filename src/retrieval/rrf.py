@@ -41,6 +41,8 @@ def reciprocal_rank_fusion(
                 source = _extract_source(result, source_name)
                 rank = _extract_rank(result, source, fallback_rank)
                 entry = fused.setdefault(chunk_id, _base_entry(result, chunk_id))
+                # The same chunk may appear in multiple retrieval lists; merge
+                # its best metadata while accumulating source-specific ranks.
                 _merge_metadata(entry, result)
 
                 if source not in entry["retrieval_sources"]:

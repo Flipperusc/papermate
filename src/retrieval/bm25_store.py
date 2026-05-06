@@ -45,6 +45,8 @@ class BM25Store:
             index_path = self._index_path(clean_paper_id)
             payload_path = self._payload_path(clean_paper_id)
 
+            # The pickle stores BM25 statistics; the JSON payload keeps chunk
+            # metadata readable and independent from the BM25 implementation.
             with index_path.open("wb") as file:
                 pickle.dump(bm25, file)
             with payload_path.open("w", encoding="utf-8") as file:

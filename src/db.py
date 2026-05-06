@@ -127,6 +127,8 @@ def init_db(db_path: str | Path | None = None) -> None:
 
 def ensure_schema_migrations(connection: sqlite3.Connection) -> None:
     """Add new columns for existing local databases."""
+    # This app keeps user data in local SQLite files, so startup migrations must
+    # be repeatable and additive instead of assuming a freshly created schema.
     migrate_literature_cards_allow_duplicates(connection)
     ensure_columns(
         connection,

@@ -228,6 +228,8 @@ def process_uploaded_pdf(uploaded_file: UploadedFile) -> dict[str, Any]:
     """Save, parse, chunk, and persist an uploaded PDF once per session file."""
     signature = get_uploaded_file_signature(uploaded_file)
     cached_result = st.session_state.get("processed_pdf")
+    # MinerU parsing can be slow and billable; include parser settings in the
+    # signature so a changed configuration forces a fresh parse.
     if cached_result and cached_result.get("signature") == signature:
         return cached_result
 
@@ -238,6 +240,8 @@ def process_uploaded_pdf(uploaded_file: UploadedFile) -> dict[str, Any]:
 
     db_save_failed = False
     try:
+        # The UI can still show the parsed Markdown if SQLite fails, but RAG and
+        # literature cards need these persisted chunks for later page actions.
         save_paper_and_chunks(
             {
                 "paper_id": saved_file["paper_id"],
@@ -354,7 +358,7 @@ def render_literature_card_save(paper_id: str, chunks: list[dict[str, Any]], db_
     existing_card = get_literature_card_by_paper(paper_id)
     if st.button("生成并保存为新文献卡片", type="primary", use_container_width=True, key=f"save_card_{paper_id}"):
         try:
-            with st.spinner("正在调用 DeepSeek 生成文献卡片并保存..."):
+            with st.spinner("正在生成文献卡片并保存..."):
                 markdown = generate_literature_card(paper_id)
                 card_id = save_literature_card(paper_id, markdown)
         except (LLMError, OSError, sqlite3.Error) as exc:
@@ -401,14 +405,16 @@ def render_index_builder(chunks: list[dict[str, Any]]) -> None:
         st.info("没有可入库的 chunk。")
         return
 
-    if st.button("构建论文索引（向量 + 关键词）", type="primary", use_container_width=True, key="build_paper_index"):
+    if st.button("构建论文索引", type="primary", use_container_width=True, key="build_paper_index"):
         paper_id = str(chunks[0].get("paper_id") or "")
         vector_count: int | None = None
         bm25_result: dict[str, Any] | None = None
         vector_error: Exception | None = None
         bm25_error: Exception | None = None
 
-        with st.spinner("正在构建 Hybrid 索引：向量索引 + 关键词索引..."):
+        with st.spinner("正在构建 Hybrid 索引"):
+            # Build the two indexes independently so the app can degrade to the
+            # working retrieval mode instead of failing the whole indexing step.
             try:
                 vector_count = VectorStore().add_chunks(chunks)
             except (EmbeddingError, VectorStoreError) as exc:
@@ -422,7 +428,7 @@ def render_index_builder(chunks: list[dict[str, Any]]) -> None:
                 logger.exception("BM25 index build failed. paper_id=%s", paper_id)
 
         if vector_error is None and bm25_error is None:
-            st.success("论文索引构建完成，可使用 Hybrid RAG 问答。")
+            st.success("论文索引构建完成，可开始问答。")
             st.caption(
                 f"向量 chunk：{vector_count or 0}；关键词 chunk：{bm25_result.get('chunk_count', 0) if bm25_result else 0}"
             )
@@ -610,7 +616,7 @@ def render_qa_box(paper_id: str) -> None:
             return
 
         try:
-            with st.spinner("正在检索论文片段并调用 DeepSeek 生成回答..."):
+            with st.spinner("正在检索论文片段并回答..."):
                 rag_result = answer_question(paper_id, question)
         except AppError as exc:
             logger.exception("RAG question answering failed. paper_id=%s", paper_id)
@@ -626,6 +632,8 @@ def render_qa_box(paper_id: str) -> None:
 
         qa_log_id = rag_result.get("qa_id")
         if qa_log_id is None:
+            # The pipeline normally saves this; keep a fallback for tests and
+            # older pipeline payloads that only return the answer object.
             try:
                 qa_log_id = save_qa_log(paper_id, question.strip(), rag_result["answer"])
             except (OSError, sqlite3.Error):
@@ -716,7 +724,7 @@ def render_workspace_page() -> None:
     processed_pdf: dict[str, Any] | None = st.session_state.get("processed_pdf")
 
     with left_col:
-        st.subheader("上传 PDF 并转为 Markdown")
+        st.subheader("上传 PDF")
         uploaded_file = st.file_uploader(
             "选择一篇 PDF 论文",
             type=["pdf"],
@@ -734,10 +742,10 @@ def render_workspace_page() -> None:
                 processed_pdf = cached_pdf
             else:
                 processed_pdf = None
-                st.info("PDF 已上传到页面，点击下方按钮后才会开始解析。MinerU 解析可能需要数十秒到数分钟。")
+                st.info("PDF 已上传到页面，点击下方按钮后开始解析。MinerU 解析可能需要数十秒到数分钟。")
                 if st.button("开始解析 PDF", type="primary", use_container_width=True, key="start_pdf_parse"):
                     try:
-                        with st.spinner("正在保存 PDF，并调用 MinerU 转换 Markdown..."):
+                        with st.spinner("正在保存 PDF 并转换为 Markdown..."):
                             processed_pdf = process_uploaded_pdf(uploaded_file)
                     except (UploadError, PdfParseError, MinerUError) as exc:
                         logger.exception("PDF upload or parse failed.")

@@ -77,7 +77,7 @@ ERROR_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.MINERU_RESULT_DOWNLOAD_FAILED: "MinerU 解析结果下载失败，请稍后重试。",
     ErrorCode.DEEPSEEK_API_KEY_MISSING: "DeepSeek API Key 未配置，请在 .env 中填写 DEEPSEEK_API_KEY。",
     ErrorCode.DEEPSEEK_LLM_FAILED: "DeepSeek 生成失败，请检查 API Key、模型名称、网络或账户额度。",
-    ErrorCode.EMBEDDING_API_KEY_MISSING: "Embedding API Key 未配置，请在 .env 中填写 EMBEDDING_API_KEY。",
+    ErrorCode.EMBEDDING_API_KEY_MISSING: "Embedding API Key 未配置，请在 .env 中填写 EMBEDDING_API_KEY 或 ZHIPU_API_KEY。",
     ErrorCode.EMBEDDING_FAILED: "Embedding 调用失败，请检查模型、网络或服务配置。",
     ErrorCode.VECTOR_INDEX_FAILED: "向量索引写入失败，请检查 Chroma 目录权限。",
     ErrorCode.VECTOR_SEARCH_FAILED: "向量检索失败，请稍后重试。",

@@ -54,10 +54,11 @@ DEEPSEEK_API_KEY=your_deepseek_api_key
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-pro
 
-EMBEDDING_PROVIDER=openai-compatible
-EMBEDDING_MODEL=text-embedding-3-small
-EMBEDDING_API_KEY=your_embedding_api_key
-EMBEDDING_BASE_URL=https://api.openai.com/v1
+EMBEDDING_PROVIDER=zhipu
+EMBEDDING_MODEL=embedding-3
+EMBEDDING_API_KEY=your_zhipu_api_key
+EMBEDDING_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+EMBEDDING_DIMENSIONS=2048
 ```
 
 `PAPERMATE_APP_PASSWORD` 是云端访问密码。公开部署时不要留空。
