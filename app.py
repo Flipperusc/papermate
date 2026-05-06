@@ -7,6 +7,7 @@ import hashlib
 import html
 import hmac
 import sqlite3
+import re
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
@@ -18,6 +19,7 @@ from src.card_pipeline import generate_literature_card
 from src.chunker import CHUNKER_VERSION, chunk_pages
 from src.db import ensure_data_directories, init_db, save_paper_and_chunks, save_qa_log
 from src.errors import (
+    AppError,
     EmbeddingError,
     ErrorCode,
     LLMError,
@@ -37,9 +39,16 @@ from src.literature_card_service import (
     save_literature_card,
     update_literature_card,
 )
+from src.logger import get_logger
 from src.pdf_parser import parse_pdf
 from src.rag_pipeline import answer_question
+from src.retrieval.bm25_store import BM25Store
 from src.vector_store import VectorStore
+
+
+logger = get_logger(__name__)
+
+MARKDOWN_PREVIEW_CHARS = 20000
 
 
 class UploadedFile(Protocol):
@@ -181,6 +190,24 @@ def build_text_preview(parsed_pdf: dict[str, Any], limit: int = 1000) -> tuple[i
     return len(full_text), full_text[:limit]
 
 
+def markdown_preview_text(markdown: str, limit: int = MARKDOWN_PREVIEW_CHARS) -> tuple[str, bool]:
+    """Return a browser-safe Markdown preview without inline image payloads."""
+    safe_markdown = re.sub(
+        r"!\[[^\]]*\]\(data:image[^)]*\)",
+        "[图片内容已省略，可在 MinerU 输出目录查看]",
+        markdown or "",
+        flags=re.IGNORECASE,
+    )
+    safe_markdown = re.sub(
+        r"\[([^\]]*)\]\(data:image[^)]*\)",
+        r"\1（图片内容已省略）",
+        safe_markdown,
+        flags=re.IGNORECASE,
+    )
+    truncated = len(safe_markdown) > limit
+    return safe_markdown[:limit], truncated
+
+
 def get_uploaded_file_signature(uploaded_file: UploadedFile) -> str:
     """Return a stable signature for the uploaded file within a Streamlit session."""
     file_bytes = uploaded_file.getvalue()
@@ -256,6 +283,7 @@ def render_upload_and_markdown(processed_pdf: dict[str, Any]) -> None:
     saved_file = processed_pdf["saved_file"]
     parsed_pdf = processed_pdf["parsed_pdf"]
     markdown = parsed_pdf.get("markdown", "") or processed_pdf["preview"]
+    preview_text, is_truncated = markdown_preview_text(markdown)
 
     st.success("PDF 已保存并完成 Markdown 解析。")
     col_a, col_b = st.columns(2)
@@ -266,11 +294,27 @@ def render_upload_and_markdown(processed_pdf: dict[str, Any]) -> None:
     st.caption(f"paper_id：{saved_file['paper_id']}")
     st.caption(f"PDF 路径：{saved_file['save_path']}")
     if parsed_pdf.get("markdown_path"):
-        st.caption(f"Markdown 路径：{parsed_pdf['markdown_path']}")
+        markdown_path = Path(parsed_pdf["markdown_path"])
+        st.caption(f"Markdown 路径：{markdown_path}")
+        if markdown_path.exists():
+            st.download_button(
+                "下载完整 Markdown",
+                data=markdown_path.read_bytes(),
+                file_name="full.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
 
     st.markdown("#### 论文 Markdown")
+    if is_truncated:
+        st.info(f"当前仅显示前 {MARKDOWN_PREVIEW_CHARS} 个字符，完整内容请下载 Markdown 文件查看。")
     with st.container(height=720, border=True):
-        st.markdown(markdown or "暂无 Markdown 内容")
+        st.text_area(
+            "Markdown 预览",
+            preview_text or "暂无 Markdown 内容",
+            height=680,
+            label_visibility="collapsed",
+        )
 
     render_extracted_images(parsed_pdf.get("images", []))
 
@@ -282,12 +326,19 @@ def render_extracted_images(images: list[dict[str, str]]) -> None:
 
     with st.expander(f"论文图片（{len(images)} 张）", expanded=False):
         st.caption("图片已单独保存到 MinerU 输出目录；Markdown 中的“此处含有图 N”链接可打开对应原图。")
-        for image in images:
+        load_previews = st.checkbox("加载图片预览（最多 10 张）", value=False)
+        visible_images = images[:10] if load_previews else []
+
+        for image in images[:20]:
+            st.caption(f"{image.get('label', '图片')}：{image.get('path', '')}")
+        if len(images) > 20:
+            st.caption(f"其余 {len(images) - 20} 张图片请在 MinerU 输出目录查看。")
+
+        for image in visible_images:
             image_path = Path(image["path"])
             if not image_path.exists():
                 continue
             st.markdown(f"**{image['label']}**")
-            st.caption(str(image_path))
             st.image(str(image_path), use_container_width=True)
 
 
@@ -344,20 +395,48 @@ def render_chunk_preview(chunks: list[dict[str, Any]]) -> None:
 
 
 def render_index_builder(chunks: list[dict[str, Any]]) -> None:
-    """Render the vector index build action."""
+    """Render the hybrid index build action."""
     st.markdown("#### 构建论文索引")
     if not chunks:
         st.info("没有可入库的 chunk。")
         return
 
-    if st.button("构建论文索引", type="primary", use_container_width=True, key="build_paper_index"):
-        try:
-            with st.spinner("正在生成 embedding 并写入 Chroma..."):
-                stored_count = VectorStore().add_chunks(chunks)
-        except (EmbeddingError, VectorStoreError) as exc:
-            st.error(f"{exc.message}（错误码：{exc.code.value}）")
-        else:
-            st.success(f"论文索引构建完成，共写入 {stored_count} 个 chunk。")
+    if st.button("构建论文索引（向量 + 关键词）", type="primary", use_container_width=True, key="build_paper_index"):
+        paper_id = str(chunks[0].get("paper_id") or "")
+        vector_count: int | None = None
+        bm25_result: dict[str, Any] | None = None
+        vector_error: Exception | None = None
+        bm25_error: Exception | None = None
+
+        with st.spinner("正在构建 Hybrid 索引：向量索引 + 关键词索引..."):
+            try:
+                vector_count = VectorStore().add_chunks(chunks)
+            except (EmbeddingError, VectorStoreError) as exc:
+                vector_error = exc
+                logger.exception("Vector index build failed. paper_id=%s", paper_id)
+
+            try:
+                bm25_result = BM25Store().build_index(paper_id, chunks)
+            except AppError as exc:
+                bm25_error = exc
+                logger.exception("BM25 index build failed. paper_id=%s", paper_id)
+
+        if vector_error is None and bm25_error is None:
+            st.success("论文索引构建完成，可使用 Hybrid RAG 问答。")
+            st.caption(
+                f"向量 chunk：{vector_count or 0}；关键词 chunk：{bm25_result.get('chunk_count', 0) if bm25_result else 0}"
+            )
+            return
+
+        if vector_error is None and bm25_error is not None:
+            st.warning("向量索引已构建成功，但关键词索引构建失败，当前仍可使用语义检索。")
+            return
+
+        if vector_error is not None and bm25_error is None:
+            st.warning("关键词索引已构建成功，但向量索引构建失败，当前只能使用关键词检索。")
+            return
+
+        st.error("索引构建失败，请检查 API Key、网络连接和本地写入权限后重试。")
 
 
 def render_citations(citations: list[dict[str, Any]]) -> None:
@@ -367,11 +446,33 @@ def render_citations(citations: list[dict[str, Any]]) -> None:
         st.write("无引用来源。")
         return
 
-    for citation in citations:
-        st.caption(
-            f"[{citation['source_id']}] 第 {citation['page_num']} 页 | "
-            f"{citation['section_title']} | chunk_id: {citation['chunk_id']}"
-        )
+    for index, citation in enumerate(citations, start=1):
+        citation_id = citation.get("citation_id") or index
+        page_label = format_page_label(citation.get("page_num"))
+        section_title = citation.get("section_title") or "未知章节"
+        title = f"引用片段 {citation_id}｜{page_label}｜{section_title}"
+        source_ranks = citation.get("source_ranks") or {}
+
+        with st.expander(title, expanded=index == 1):
+            st.write("chunk_id：", citation.get("chunk_id", ""))
+            st.write("检索来源：", format_retrieval_sources(citation.get("retrieval_sources")))
+            st.write("source_ranks：", source_ranks or "无")
+
+            vector_rank = source_ranks.get("vector")
+            bm25_rank = source_ranks.get("bm25")
+            if vector_rank:
+                st.write("向量排名：", vector_rank)
+            if bm25_rank:
+                st.write("BM25 排名：", bm25_rank)
+
+            rrf_score = citation.get("rrf_score")
+            if rrf_score is not None:
+                st.write("RRF 分数：", format_optional_float(rrf_score))
+
+            preview = citation.get("text_preview") or ""
+            if preview:
+                st.markdown("**原文预览**")
+                st.write(preview)
 
 
 def render_source_chunks(source_chunks: list[dict[str, Any]]) -> None:
@@ -382,12 +483,115 @@ def render_source_chunks(source_chunks: list[dict[str, Any]]) -> None:
         return
 
     for chunk in source_chunks:
+        source_id = chunk.get("source_id") or f"片段{chunk.get('citation_id', '')}"
         title = (
-            f"[{chunk['source_id']}] 第 {chunk['page_num']} 页 | "
-            f"{chunk['section_title']} | {chunk['chunk_id']}"
+            f"[{source_id}] {format_page_label(chunk.get('page_num'))} | "
+            f"{chunk.get('section_title', '未知章节')} | {chunk.get('chunk_id', '')}"
         )
         with st.expander(title):
-            st.write(chunk["text"])
+            st.write(chunk.get("text", ""))
+
+
+def format_page_label(page_num: Any) -> str:
+    """Format both legacy numeric pages and new citation page labels."""
+    if page_num is None:
+        return "未知页"
+    text = str(page_num).strip()
+    if not text:
+        return "未知页"
+    if "页" in text:
+        return text
+    return f"第 {text} 页"
+
+
+def render_retrieval_details(details: dict[str, Any]) -> None:
+    """Render hybrid retrieval diagnostics for the latest answer."""
+    st.markdown("#### 检索细节")
+    if not details:
+        st.write("暂无检索细节。")
+        return
+
+    with st.expander("查看 Hybrid 检索细节", expanded=False):
+        strategy = details.get("strategy", "")
+        st.info(strategy_message(strategy))
+        st.write("strategy：", strategy or "未知")
+        st.write("query_type：", details.get("query_type") or details.get("question_type") or "default")
+        st.write("expanded_query：", details.get("expanded_query") or "无")
+        st.write("vector_top_k：", details.get("vector_top_k", ""))
+        st.write("bm25_top_k：", details.get("bm25_top_k", ""))
+        st.write("final_top_k：", details.get("final_top_k", ""))
+        st.write("rrf_k：", details.get("rrf_k", ""))
+        st.write("latency_ms：", details.get("latency_ms", ""))
+
+        expanded_terms = [str(term) for term in details.get("expanded_terms", []) if term]
+        if expanded_terms:
+            st.write("扩展关键词：", "、".join(expanded_terms[:30]))
+
+        rows = details.get("retrieved_chunks") or []
+        if not rows:
+            st.write("没有可展示的融合排序结果。")
+            return
+
+        display_rows: list[dict[str, Any]] = []
+        for row in rows:
+            sources = row.get("retrieval_sources") or []
+            source_text = " + ".join("向量" if source == "vector" else "BM25" for source in sources)
+            display_rows.append(
+                {
+                    "RRF排名": row.get("rank"),
+                    "chunk_id": row.get("chunk_id"),
+                    "页码": row.get("page_num"),
+                    "章节": row.get("section_title") or "未识别章节",
+                    "来源": source_text,
+                    "RRF分数": format_optional_float(row.get("rrf_score")),
+                    "向量排名": row.get("vector_rank") or "",
+                    "BM25排名": row.get("bm25_rank") or "",
+                    "BM25分数": format_optional_float(row.get("bm25_score")),
+                    "向量距离": format_optional_float(row.get("vector_distance")),
+                }
+            )
+
+        st.dataframe(display_rows, use_container_width=True, hide_index=True)
+
+
+def format_optional_float(value: Any) -> str:
+    """Format optional numeric values for retrieval details."""
+    if value is None or value == "":
+        return ""
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def format_retrieval_sources(sources: Any) -> str:
+    """Format retrieval source labels for citations and debug UI."""
+    if not sources:
+        return "未知"
+    if isinstance(sources, str):
+        sources = [sources]
+    labels = []
+    for source in sources:
+        if source == "vector":
+            labels.append("vector")
+        elif source == "bm25":
+            labels.append("bm25")
+        else:
+            labels.append(str(source))
+    return "+".join(labels)
+
+
+def strategy_message(strategy: str) -> str:
+    """Return a short Chinese explanation for the retrieval strategy."""
+    if strategy == "hybrid_rrf":
+        return "当前使用：向量检索 + 关键词检索 + RRF 融合"
+    if strategy == "vector_fallback":
+        return "当前使用：仅向量检索。关键词索引可能尚未构建。"
+    if strategy == "bm25_fallback":
+        return "当前使用：仅关键词检索。向量索引可能尚未构建。"
+    if strategy in {"empty", "hybrid_empty"}:
+        return "未检索到足够依据。"
+    return "当前检索策略未知，请查看日志或检查索引配置。"
 
 
 def render_qa_box(paper_id: str) -> None:
@@ -408,15 +612,25 @@ def render_qa_box(paper_id: str) -> None:
         try:
             with st.spinner("正在检索论文片段并调用 DeepSeek 生成回答..."):
                 rag_result = answer_question(paper_id, question)
-        except (EmbeddingError, VectorStoreError, LLMError) as exc:
-            st.error(f"{exc.message}（错误码：{exc.code.value}）")
+        except AppError as exc:
+            logger.exception("RAG question answering failed. paper_id=%s", paper_id)
+            if exc.code in {ErrorCode.VECTOR_SEARCH_FAILED, ErrorCode.BM25_INDEX_MISSING}:
+                st.error("请先构建论文索引后再提问。")
+            else:
+                st.error("问答失败，请查看日志或检查模型与索引配置。")
+            return
+        except Exception:
+            logger.exception("Unexpected RAG question answering failure. paper_id=%s", paper_id)
+            st.error("问答失败，请查看日志或检查模型与索引配置。")
             return
 
-        qa_log_id = None
-        try:
-            qa_log_id = save_qa_log(paper_id, question.strip(), rag_result["answer"])
-        except (OSError, sqlite3.Error):
-            st.warning("问答记录保存失败，但不影响当前回答。")
+        qa_log_id = rag_result.get("qa_id")
+        if qa_log_id is None:
+            try:
+                qa_log_id = save_qa_log(paper_id, question.strip(), rag_result["answer"])
+            except (OSError, sqlite3.Error):
+                logger.exception("QA log save failed. paper_id=%s", paper_id)
+                st.warning("问答记录保存失败，但不影响当前回答。")
 
         st.session_state[f"last_qa_{paper_id}"] = {
             "paper_id": paper_id,
@@ -424,6 +638,7 @@ def render_qa_box(paper_id: str) -> None:
             "answer": rag_result["answer"],
             "citations": rag_result["citations"],
             "source_chunks": rag_result["source_chunks"],
+            "retrieval_details": rag_result.get("retrieval_details") or rag_result.get("retrieval_debug", {}),
             "qa_log_id": qa_log_id,
         }
 
@@ -431,9 +646,22 @@ def render_qa_box(paper_id: str) -> None:
     if qa_record:
         st.markdown("#### 回答")
         st.write(qa_record["answer"])
+        if needs_index_warning(qa_record.get("retrieval_details", {})):
+            st.warning("请先构建论文索引后再提问。")
         render_citations(qa_record["citations"])
+        render_retrieval_details(qa_record.get("retrieval_details", {}))
         render_source_chunks(qa_record["source_chunks"])
         render_feedback_form(qa_record)
+
+
+def needs_index_warning(details: dict[str, Any]) -> bool:
+    """Infer an index-missing state from hybrid retrieval debug info."""
+    if not details:
+        return False
+    strategy = details.get("strategy")
+    if strategy not in {"empty", "hybrid_empty"}:
+        return False
+    return bool(details.get("vector_error") and details.get("bm25_error"))
 
 
 def render_feedback_form(qa_record: dict[str, Any]) -> None:
@@ -496,14 +724,25 @@ def render_workspace_page() -> None:
         )
 
         if uploaded_file is None:
-            st.info("上传 PDF 后，左侧会显示完整 Markdown，右侧可以构建索引并进行问答。")
+            st.info("上传 PDF 后，点击开始解析；解析完成后左侧会显示 Markdown 预览，右侧可以构建索引并进行问答。")
         else:
-            try:
-                with st.spinner("正在保存 PDF，并调用 MinerU 转换 Markdown..."):
-                    processed_pdf = process_uploaded_pdf(uploaded_file)
-            except (UploadError, PdfParseError, MinerUError) as exc:
-                st.error(f"{exc.message}（错误码：{exc.code.value}）")
+            signature = get_uploaded_file_signature(uploaded_file)
+            cached_pdf = processed_pdf if processed_pdf and processed_pdf.get("signature") == signature else None
+            st.caption(f"已选择文件：{uploaded_file.name}，大小：{format_file_size(len(uploaded_file.getvalue()))}")
+
+            if cached_pdf:
+                processed_pdf = cached_pdf
+            else:
                 processed_pdf = None
+                st.info("PDF 已上传到页面，点击下方按钮后才会开始解析。MinerU 解析可能需要数十秒到数分钟。")
+                if st.button("开始解析 PDF", type="primary", use_container_width=True, key="start_pdf_parse"):
+                    try:
+                        with st.spinner("正在保存 PDF，并调用 MinerU 转换 Markdown..."):
+                            processed_pdf = process_uploaded_pdf(uploaded_file)
+                    except (UploadError, PdfParseError, MinerUError) as exc:
+                        logger.exception("PDF upload or parse failed.")
+                        st.error(f"{exc.message}（错误码：{exc.code.value}）")
+                        processed_pdf = None
 
             if processed_pdf:
                 if processed_pdf["db_save_failed"]:

@@ -1,7 +1,8 @@
 streamlit>=1.35.0
 python-dotenv>=1.0.1
-PyMuPDF>=1.24.0
-chromadb>=0.5.0
-requests>=2.32.0
-# DeepSeek uses the OpenAI-compatible SDK client.
 openai>=1.35.0
+chromadb>=0.5.0
+pandas>=2.2.0
+requests>=2.32.0
+rank_bm25>=0.2.2
+PyMuPDF>=1.24.0
