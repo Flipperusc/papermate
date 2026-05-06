@@ -6,8 +6,11 @@ import base64
 import hashlib
 import html
 import hmac
+import io
+import os
 import sqlite3
 import re
+import zipfile
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
@@ -48,7 +51,14 @@ from src.vector_store import VectorStore
 
 logger = get_logger(__name__)
 
-MARKDOWN_PREVIEW_CHARS = 20000
+CARD_PALETTES = [
+    {"top": "#eaf3ff", "accent": "#2563eb", "field": "#f6faff"},
+    {"top": "#eafaf4", "accent": "#0f766e", "field": "#f3fbf8"},
+    {"top": "#fff4dc", "accent": "#b45309", "field": "#fffaf0"},
+    {"top": "#fff0f4", "accent": "#be123c", "field": "#fff7f9"},
+    {"top": "#f1f0ff", "accent": "#6d28d9", "field": "#faf9ff"},
+    {"top": "#eefdf3", "accent": "#15803d", "field": "#f7fef9"},
+]
 
 
 class UploadedFile(Protocol):
@@ -66,35 +76,167 @@ def inject_styles() -> None:
     st.markdown(
         """
         <style>
+        :root {
+            --pm-bg: #f7f7f5;
+            --pm-surface: #ffffff;
+            --pm-surface-soft: #f3f4f2;
+            --pm-border: #deded8;
+            --pm-text: #202123;
+            --pm-muted: #6b6f76;
+            --pm-accent-main: #10a37f;
+            --pm-accent-strong: #0f7f66;
+            --pm-blue: #2563eb;
+        }
+        .stApp {
+            background: var(--pm-bg);
+            color: var(--pm-text);
+        }
+        html, body,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stHeader"] {
+            background: var(--pm-bg) !important;
+            color: var(--pm-text) !important;
+        }
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"] {
+            display: none;
+        }
         .block-container {
-            padding-top: 1.2rem;
-            padding-bottom: 2rem;
-            max-width: 1500px;
+            padding-top: 1rem;
+            padding-bottom: 2.4rem;
+            max-width: 1560px;
+        }
+        section[data-testid="stSidebar"] {
+            background: #f4f4f1 !important;
+            border-right: 1px solid #deded8;
+            color: var(--pm-text);
+        }
+        section[data-testid="stSidebar"] > div {
+            padding-top: 18px;
+        }
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 {
+            font-size: 17px;
+            letter-spacing: 0;
+            margin-bottom: 4px;
+            color: #202123;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] {
+            display: grid;
+            gap: 6px;
+            margin-top: 10px;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label {
+            border-radius: 10px;
+            padding: 8px 10px;
+            color: #202123;
+            transition: background 120ms ease, box-shadow 120ms ease;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label > div:first-child {
+            margin-right: 8px;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
+            background: #e9e9e4;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+            background: #e3f2ec;
+            box-shadow: inset 3px 0 0 var(--pm-accent-main);
+        }
+        h1, h2, h3, h4, h5 {
+            color: var(--pm-text);
+            letter-spacing: 0;
+        }
+        p, li, label, span, div {
+            color-scheme: light;
+        }
+        div[data-testid="stMetric"] {
+            background: var(--pm-surface);
+            border: 1px solid var(--pm-border);
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+        .stButton > button,
+        .stDownloadButton > button,
+        button[kind="primary"] {
+            border-radius: 8px;
+            border: 1px solid transparent;
+            font-weight: 600;
+        }
+        .stButton > button[kind="primary"],
+        .stDownloadButton > button[kind="primary"] {
+            background: var(--pm-accent-main);
+            border-color: var(--pm-accent-main);
+        }
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+            border-color: var(--pm-accent-main);
+        }
+        div[data-testid="stExpander"] {
+            border-color: var(--pm-border);
+            border-radius: 8px;
+            background: var(--pm-surface);
+        }
+        div[data-testid="stTextArea"] textarea,
+        div[data-testid="stTextInput"] input {
+            border-radius: 8px;
+            border-color: var(--pm-border);
+            background: #ffffff;
+            color: var(--pm-text);
+        }
+        .pm-sidebar-brand {
+            border-radius: 10px;
+            padding: 10px 10px 12px 10px;
+            background: #ffffff;
+            border: 1px solid #e3e3de;
+            margin-bottom: 10px;
+        }
+        .pm-sidebar-brand-title {
+            font-size: 18px;
+            font-weight: 750;
+            line-height: 1.2;
+            color: #202123;
+            margin-bottom: 3px;
+        }
+        .pm-sidebar-brand-subtitle {
+            font-size: 12px;
+            color: #6b6f76;
+            line-height: 1.45;
+        }
+        .pm-sidebar-section {
+            margin: 16px 0 6px 0;
+            color: #6b6f76;
+            font-size: 12px;
+            font-weight: 700;
         }
         .pm-hero {
-            border: 0;
+            border: 1px solid #cfe4dc;
             border-radius: 8px;
-            padding: 20px 22px;
-            background: #eef6ff;
+            padding: 18px 22px;
+            background: #ecf7f2;
             margin-bottom: 16px;
-            box-shadow: inset 0 0 0 1px #c7ddf5, 0 1px 2px rgba(15, 23, 42, 0.05);
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
         }
         .pm-hero h1 {
             margin: 0 0 4px 0;
-            font-size: 30px;
+            font-size: 29px;
             letter-spacing: 0;
         }
         .pm-hero p {
             margin: 0;
-            color: #31506f;
+            color: #3f5f55;
         }
         .pm-card {
-            border: 1px solid #e3e7ee;
+            border: 1px solid var(--pm-border);
             border-radius: 8px;
-            padding: 18px 20px;
+            padding: 0;
             background: #ffffff;
-            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
             margin-bottom: 14px;
+            overflow: hidden;
+        }
+        .pm-card-top {
+            padding: 16px 18px 14px 18px;
+            border-left: 6px solid var(--pm-accent);
+            background: var(--pm-top);
         }
         .pm-card-title {
             font-size: 20px;
@@ -110,19 +252,26 @@ def inject_styles() -> None:
             margin-bottom: 14px;
         }
         .pm-chip {
-            border: 1px solid #d9e1ee;
+            border: 1px solid rgba(15, 23, 42, 0.08);
             border-radius: 999px;
             padding: 4px 10px;
             font-size: 12px;
-            color: #475569;
-            background: #f8fafc;
+            color: #172033;
+            background: rgba(255, 255, 255, 0.74);
+        }
+        .pm-card-body {
+            display: grid;
+            gap: 10px;
+            padding: 14px 16px 16px 16px;
         }
         .pm-field {
-            margin-top: 12px;
+            border-radius: 8px;
+            padding: 10px 12px;
+            background: var(--pm-field-bg);
         }
         .pm-field-label {
             font-size: 12px;
-            color: #64748b;
+            color: var(--pm-accent);
             font-weight: 700;
             margin-bottom: 4px;
         }
@@ -134,6 +283,22 @@ def inject_styles() -> None:
         .pm-small {
             color: #64748b;
             font-size: 13px;
+        }
+        .pm-source-anchor {
+            display: block;
+            scroll-margin-top: 16px;
+            height: 1px;
+        }
+        .pm-source-link {
+            display: inline-flex;
+            align-items: center;
+            border: 1px solid #b7d5f8;
+            border-radius: 999px;
+            padding: 3px 10px;
+            background: #eff6ff;
+            color: #1d4ed8;
+            font-size: 13px;
+            text-decoration: none;
         }
         iframe.pm-pdf {
             border: 1px solid #d8dee9;
@@ -190,22 +355,257 @@ def build_text_preview(parsed_pdf: dict[str, Any], limit: int = 1000) -> tuple[i
     return len(full_text), full_text[:limit]
 
 
-def markdown_preview_text(markdown: str, limit: int = MARKDOWN_PREVIEW_CHARS) -> tuple[str, bool]:
-    """Return a browser-safe Markdown preview without inline image payloads."""
+def markdown_for_display(markdown: str, images: list[dict[str, str]] | None = None) -> str:
+    """Return full Markdown with image payloads replaced by text placeholders."""
+    next_image_index = 1
+
+    def next_placeholder() -> str:
+        nonlocal next_image_index
+        index = next_image_index
+        next_image_index += 1
+        return f"**此处图片{index}已省略**"
+
+    safe_markdown = markdown or ""
     safe_markdown = re.sub(
         r"!\[[^\]]*\]\(data:image[^)]*\)",
-        "[图片内容已省略，可在 MinerU 输出目录查看]",
-        markdown or "",
-        flags=re.IGNORECASE,
-    )
-    safe_markdown = re.sub(
-        r"\[([^\]]*)\]\(data:image[^)]*\)",
-        r"\1（图片内容已省略）",
+        lambda _match: next_placeholder(),
         safe_markdown,
         flags=re.IGNORECASE,
     )
-    truncated = len(safe_markdown) > limit
-    return safe_markdown[:limit], truncated
+
+    def replace_data_uri_link(match: re.Match[str]) -> str:
+        nonlocal next_image_index
+        label = match.group("label")
+        image_match = re.search(r"图\s*(\d+)", label)
+        if image_match:
+            image_index = int(image_match.group(1))
+            next_image_index = max(next_image_index, image_index + 1)
+            return f"**此处图片{image_index}已省略**"
+        return next_placeholder()
+
+    safe_markdown = re.sub(
+        r"\[(?P<label>[^\]]*)\]\(data:image[^)]*\)",
+        replace_data_uri_link,
+        safe_markdown,
+        flags=re.IGNORECASE,
+    )
+    safe_markdown = re.sub(
+        r"!\[[^\]]*\]\([^)]+\)",
+        lambda _match: next_placeholder(),
+        safe_markdown,
+    )
+    safe_markdown = re.sub(
+        r"<img\b[^>]*>",
+        lambda _match: next_placeholder(),
+        safe_markdown,
+        flags=re.IGNORECASE,
+    )
+    return safe_markdown.strip()
+
+
+def split_paper_header(markdown: str) -> tuple[dict[str, str], str]:
+    """Extract likely title and author lines from the beginning of Markdown."""
+    lines = (markdown or "").splitlines()
+    title_index: int | None = None
+    title = ""
+
+    for index, line in enumerate(lines[:40]):
+        candidate = clean_header_line(line)
+        if not candidate or is_front_matter_noise(candidate):
+            continue
+        title_index = index
+        title = candidate
+        break
+
+    if title_index is None:
+        return {}, markdown.strip()
+
+    author_lines: list[str] = []
+    body_start = title_index + 1
+    for index in range(title_index + 1, min(len(lines), title_index + 18)):
+        candidate = clean_header_line(lines[index])
+        if not candidate:
+            if author_lines:
+                body_start = index + 1
+            continue
+        if is_body_start_heading(candidate):
+            body_start = index
+            break
+        if len(author_lines) >= 6:
+            body_start = index
+            break
+        author_lines.append(candidate)
+        body_start = index + 1
+
+    body_markdown = "\n".join(lines[body_start:]).strip()
+    return {"title": title, "authors": "；".join(author_lines)}, body_markdown
+
+
+def clean_header_line(line: str) -> str:
+    """Normalize one potential title or author line."""
+    cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", line.strip()).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip(" -–—")
+
+
+def is_front_matter_noise(text: str) -> bool:
+    """Return whether a leading Markdown line is not paper title/author text."""
+    lowered = text.lower()
+    plain_text = text.strip("*_ ")
+    return (
+        lowered.startswith("<!--")
+        or lowered.startswith("![")
+        or lowered.startswith("[此处")
+        or plain_text.startswith("此处图片")
+        or lowered in {"paper", "title"}
+    )
+
+
+def is_body_start_heading(text: str) -> bool:
+    """Return whether a line likely begins the paper body after title/authors."""
+    normalized = text.strip().lower().rstrip(":：")
+    return normalized in {
+        "abstract",
+        "摘要",
+        "keywords",
+        "key words",
+        "关键词",
+        "introduction",
+        "1 introduction",
+        "i introduction",
+    }
+
+
+def build_images_zip(images: list[dict[str, str]]) -> tuple[bytes, int]:
+    """Create an in-memory zip containing extracted image files."""
+    buffer = io.BytesIO()
+    written_names: set[str] = set()
+    written_count = 0
+
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, image in enumerate(images, start=1):
+            image_path = Path(image.get("path", ""))
+            if not image_path.exists() or not image_path.is_file():
+                continue
+
+            archive_name = unique_zip_name(
+                image.get("file_name") or image_path.name or f"image_{index}{image_path.suffix}",
+                written_names,
+            )
+            archive.write(image_path, arcname=archive_name)
+            written_count += 1
+
+    return buffer.getvalue(), written_count
+
+
+def unique_zip_name(file_name: str, used_names: set[str]) -> str:
+    """Return a unique zip member name."""
+    clean_name = re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+", "_", file_name).strip("._")
+    if not clean_name:
+        clean_name = f"image_{len(used_names) + 1}.png"
+
+    stem = Path(clean_name).stem
+    suffix = Path(clean_name).suffix or ".png"
+    candidate = f"{stem}{suffix}"
+    counter = 2
+    while candidate.lower() in used_names:
+        candidate = f"{stem}_{counter}{suffix}"
+        counter += 1
+    used_names.add(candidate.lower())
+    return candidate
+
+
+def chunk_anchor_id(chunk_id: Any) -> str:
+    """Build a browser-safe anchor id for one chunk."""
+    raw_chunk_id = str(chunk_id or "").strip()
+    safe_id = re.sub(r"[^A-Za-z0-9_-]+", "-", raw_chunk_id).strip("-")
+    if not safe_id:
+        safe_id = hashlib.sha1(raw_chunk_id.encode("utf-8")).hexdigest()[:12]
+    return f"pm-source-{safe_id}"
+
+
+def chunk_anchor_html(chunk_id: Any) -> str:
+    """Return an HTML anchor marker for chunk-level source navigation."""
+    anchor_id = html.escape(chunk_anchor_id(chunk_id), quote=True)
+    return f'<span id="{anchor_id}" class="pm-source-anchor"></span>'
+
+
+def source_anchor_link(chunk_id: Any, label: str = "回到原文") -> str:
+    """Return a small HTML link that navigates to a chunk anchor."""
+    anchor_id = html.escape(chunk_anchor_id(chunk_id), quote=True)
+    return f'<a class="pm-source-link" href="#{anchor_id}">{html.escape(label)}</a>'
+
+
+def add_chunk_anchors_to_markdown(
+    markdown: str,
+    chunks: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    """Insert chunk anchors into Markdown when chunk text can be located."""
+    if not markdown or not chunks:
+        return markdown, chunks
+
+    normalized_markdown, offset_map = normalize_with_offsets(markdown)
+    inserts: list[tuple[int, str]] = []
+    missing_chunks: list[dict[str, Any]] = []
+    used_positions: set[int] = set()
+
+    for chunk in chunks:
+        candidate = chunk_search_candidate(str(chunk.get("text") or ""))
+        normalized_candidate, _ = normalize_with_offsets(candidate)
+        if len(normalized_candidate) < 24:
+            missing_chunks.append(chunk)
+            continue
+
+        match_position = normalized_markdown.find(normalized_candidate)
+        if match_position < 0:
+            missing_chunks.append(chunk)
+            continue
+
+        original_position = offset_map[match_position]
+        while original_position in used_positions and original_position < len(markdown):
+            original_position += 1
+        used_positions.add(original_position)
+        inserts.append((original_position, chunk_anchor_html(chunk.get("chunk_id"))))
+
+    anchored_markdown = markdown
+    for position, anchor in sorted(inserts, key=lambda item: item[0], reverse=True):
+        anchored_markdown = f"{anchored_markdown[:position]}{anchor}\n{anchored_markdown[position:]}"
+
+    return anchored_markdown, missing_chunks
+
+
+def normalize_with_offsets(text: str) -> tuple[str, list[int]]:
+    """Normalize text for fuzzy position search while keeping original offsets."""
+    normalized_chars: list[str] = []
+    offset_map: list[int] = []
+    previous_space = True
+
+    for index, char in enumerate(text):
+        if char.isspace():
+            if not previous_space and normalized_chars:
+                normalized_chars.append(" ")
+                offset_map.append(index)
+            previous_space = True
+            continue
+
+        normalized_chars.append(char.lower())
+        offset_map.append(index)
+        previous_space = False
+
+    if normalized_chars and normalized_chars[-1] == " ":
+        normalized_chars.pop()
+        offset_map.pop()
+
+    return "".join(normalized_chars), offset_map
+
+
+def chunk_search_candidate(text: str) -> str:
+    """Pick a stable searchable prefix from a chunk."""
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    cleaned = re.sub(r"\*\*此处图片\d+已省略\*\*", " ", cleaned)
+    if not cleaned:
+        return ""
+    return cleaned[: min(220, len(cleaned))]
 
 
 def get_uploaded_file_signature(uploaded_file: UploadedFile) -> str:
@@ -282,17 +682,16 @@ def render_header() -> None:
     )
 
 
-def render_upload_and_markdown(processed_pdf: dict[str, Any]) -> None:
-    """Render uploaded file metadata and full markdown document."""
+def render_processed_pdf_summary(processed_pdf: dict[str, Any]) -> None:
+    """Render uploaded file metadata and source downloads."""
     saved_file = processed_pdf["saved_file"]
     parsed_pdf = processed_pdf["parsed_pdf"]
-    markdown = parsed_pdf.get("markdown", "") or processed_pdf["preview"]
-    preview_text, is_truncated = markdown_preview_text(markdown)
 
     st.success("PDF 已保存并完成 Markdown 解析。")
-    col_a, col_b = st.columns(2)
+    col_a, col_b, col_c = st.columns(3)
     col_a.metric("页数", parsed_pdf["page_count"])
     col_b.metric("字符数", processed_pdf["total_chars"])
+    col_c.metric("图片数", len(parsed_pdf.get("images", [])))
 
     st.caption(f"文件名：{saved_file['file_name']}")
     st.caption(f"paper_id：{saved_file['paper_id']}")
@@ -309,27 +708,47 @@ def render_upload_and_markdown(processed_pdf: dict[str, Any]) -> None:
                 use_container_width=True,
             )
 
-    st.markdown("#### 论文 Markdown")
-    if is_truncated:
-        st.info(f"当前仅显示前 {MARKDOWN_PREVIEW_CHARS} 个字符，完整内容请下载 Markdown 文件查看。")
-    with st.container(height=720, border=True):
-        st.text_area(
-            "Markdown 预览",
-            preview_text or "暂无 Markdown 内容",
-            height=680,
-            label_visibility="collapsed",
-        )
-
     render_extracted_images(parsed_pdf.get("images", []))
 
 
+def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
+    """Render the full paper Markdown inline, excluding image payloads."""
+    parsed_pdf = processed_pdf["parsed_pdf"]
+    markdown = parsed_pdf.get("markdown", "") or processed_pdf["preview"]
+    safe_markdown = markdown_for_display(markdown, parsed_pdf.get("images", []))
+    paper_header, body_markdown = split_paper_header(safe_markdown)
+    anchored_body, _missing_chunks = add_chunk_anchors_to_markdown(
+        body_markdown or safe_markdown,
+        processed_pdf.get("chunks", []),
+    )
+
+    st.markdown("#### 论文正文")
+    if paper_header:
+        st.markdown("##### 开头信息")
+        st.write("标题：", paper_header.get("title") or "未识别")
+        st.write("作者：", paper_header.get("authors") or "未识别")
+
+    st.markdown(anchored_body or "暂无 Markdown 内容", unsafe_allow_html=True)
+
 def render_extracted_images(images: list[dict[str, str]]) -> None:
-    """Render extracted paper images for direct inspection."""
+    """Render extracted paper image downloads and optional inspection."""
     if not images:
         return
 
     with st.expander(f"论文图片（{len(images)} 张）", expanded=False):
-        st.caption("图片已单独保存到 MinerU 输出目录；Markdown 中的“此处含有图 N”链接可打开对应原图。")
+        zip_bytes, image_count = build_images_zip(images)
+        if image_count:
+            st.download_button(
+                "下载全部图片 ZIP",
+                data=zip_bytes,
+                file_name="paper_images.zip",
+                mime="application/zip",
+                use_container_width=True,
+            )
+        else:
+            st.warning("没有找到可打包的图片文件。")
+
+        st.caption("正文中图片已用“此处图片 N 已省略”表示，原图可通过 ZIP 下载。")
         load_previews = st.checkbox("加载图片预览（最多 10 张）", value=False)
         visible_images = images[:10] if load_previews else []
 
@@ -461,6 +880,7 @@ def render_citations(citations: list[dict[str, Any]]) -> None:
 
         with st.expander(title, expanded=index == 1):
             st.write("chunk_id：", citation.get("chunk_id", ""))
+            st.markdown(source_anchor_link(citation.get("chunk_id")), unsafe_allow_html=True)
             st.write("检索来源：", format_retrieval_sources(citation.get("retrieval_sources")))
             st.write("source_ranks：", source_ranks or "无")
 
@@ -495,6 +915,7 @@ def render_source_chunks(source_chunks: list[dict[str, Any]]) -> None:
             f"{chunk.get('section_title', '未知章节')} | {chunk.get('chunk_id', '')}"
         )
         with st.expander(title):
+            st.markdown(source_anchor_link(chunk.get("chunk_id")), unsafe_allow_html=True)
             st.write(chunk.get("text", ""))
 
 
@@ -720,62 +1141,72 @@ def render_workspace_page() -> None:
     """Render the two-column paper workspace page."""
     render_header()
 
-    left_col, right_col = st.columns([1.1, 0.9], gap="large")
     processed_pdf: dict[str, Any] | None = st.session_state.get("processed_pdf")
 
-    with left_col:
-        st.subheader("上传 PDF")
-        uploaded_file = st.file_uploader(
-            "选择一篇 PDF 论文",
-            type=["pdf"],
-            accept_multiple_files=False,
-        )
+    st.subheader("上传 PDF")
+    uploaded_file = st.file_uploader(
+        "选择一篇 PDF 论文",
+        type=["pdf"],
+        accept_multiple_files=False,
+    )
 
-        if uploaded_file is None:
-            st.info("上传 PDF 后，点击开始解析；解析完成后左侧会显示 Markdown 预览，右侧可以构建索引并进行问答。")
-        else:
-            signature = get_uploaded_file_signature(uploaded_file)
-            cached_pdf = processed_pdf if processed_pdf and processed_pdf.get("signature") == signature else None
-            st.caption(f"已选择文件：{uploaded_file.name}，大小：{format_file_size(len(uploaded_file.getvalue()))}")
+    if uploaded_file is None:
+        st.info("上传 PDF 后，点击开始解析；解析完成后页面会显示完整 Markdown，右侧可以进行论文问答。")
+        return
 
-            if cached_pdf:
-                processed_pdf = cached_pdf
-            else:
+    signature = get_uploaded_file_signature(uploaded_file)
+    cached_pdf = processed_pdf if processed_pdf and processed_pdf.get("signature") == signature else None
+    st.caption(f"已选择文件：{uploaded_file.name}，大小：{format_file_size(len(uploaded_file.getvalue()))}")
+
+    if cached_pdf:
+        processed_pdf = cached_pdf
+    else:
+        processed_pdf = None
+        st.info("PDF 已上传到页面，点击下方按钮后开始解析。MinerU 解析可能需要数十秒到数分钟。")
+        if st.button("开始解析 PDF", type="primary", use_container_width=True, key="start_pdf_parse"):
+            try:
+                with st.spinner("正在保存 PDF 并转换为 Markdown..."):
+                    processed_pdf = process_uploaded_pdf(uploaded_file)
+            except (UploadError, PdfParseError, MinerUError) as exc:
+                logger.exception("PDF upload or parse failed.")
+                st.error(f"{exc.message}（错误码：{exc.code.value}）")
                 processed_pdf = None
-                st.info("PDF 已上传到页面，点击下方按钮后开始解析。MinerU 解析可能需要数十秒到数分钟。")
-                if st.button("开始解析 PDF", type="primary", use_container_width=True, key="start_pdf_parse"):
-                    try:
-                        with st.spinner("正在保存 PDF 并转换为 Markdown..."):
-                            processed_pdf = process_uploaded_pdf(uploaded_file)
-                    except (UploadError, PdfParseError, MinerUError) as exc:
-                        logger.exception("PDF upload or parse failed.")
-                        st.error(f"{exc.message}（错误码：{exc.code.value}）")
-                        processed_pdf = None
 
-            if processed_pdf:
-                if processed_pdf["db_save_failed"]:
-                    st.warning("数据保存失败，但不影响当前解析结果，请检查 SQLite 数据库权限。")
+    if not processed_pdf:
+        return
 
-                render_upload_and_markdown(processed_pdf)
-                render_literature_card_save(
-                    processed_pdf["saved_file"]["paper_id"],
-                    processed_pdf["chunks"],
-                    processed_pdf["db_save_failed"],
-                )
+    if processed_pdf["db_save_failed"]:
+        st.warning("数据保存失败，但不影响当前解析结果，请检查 SQLite 数据库权限。")
+
+    render_processed_pdf_summary(processed_pdf)
+    render_index_builder(processed_pdf["chunks"])
+
+    st.divider()
+    left_col, right_col = st.columns([1.12, 0.88], gap="large")
+    with left_col:
+        render_markdown_document(processed_pdf)
 
     with right_col:
-        if not processed_pdf:
-            st.subheader("索引与问答")
-            st.info("请先在左侧上传并解析 PDF。")
-            return
-
-        render_index_builder(processed_pdf["chunks"])
         render_qa_box(processed_pdf["saved_file"]["paper_id"])
+        render_literature_card_save(
+            processed_pdf["saved_file"]["paper_id"],
+            processed_pdf["chunks"],
+            processed_pdf["db_save_failed"],
+        )
 
 
 def escaped_text(value: Any) -> str:
     """Escape text for safe HTML rendering."""
     return html.escape(str(value or "原文未明确说明")).replace("\n", "<br>")
+
+
+def card_palette(card: dict[str, Any]) -> dict[str, str]:
+    """Pick a stable visual palette for a literature card."""
+    try:
+        card_id = int(card.get("card_id") or 0)
+    except (TypeError, ValueError):
+        card_id = 0
+    return CARD_PALETTES[card_id % len(CARD_PALETTES)]
 
 
 def render_card_visual(card: dict[str, Any]) -> None:
@@ -787,27 +1218,35 @@ def render_card_visual(card: dict[str, Any]) -> None:
     question = escaped_text(card.get("research_question"))
     method = escaped_text(card.get("method_summary"))
     datasets = escaped_text(card.get("datasets"))
+    palette = card_palette(card)
 
     st.markdown(
         f"""
-        <div class="pm-card">
-          <div class="pm-card-title">{title}</div>
-          <div class="pm-meta">
-            <span class="pm-chip">作者：{authors}</span>
-            <span class="pm-chip">年份：{year}</span>
-            <span class="pm-chip">领域：{field}</span>
+        <div
+          class="pm-card"
+          style="--pm-top: {palette['top']}; --pm-accent: {palette['accent']}; --pm-field-bg: {palette['field']};"
+        >
+          <div class="pm-card-top">
+            <div class="pm-card-title">{title}</div>
+            <div class="pm-meta">
+              <span class="pm-chip">作者：{authors}</span>
+              <span class="pm-chip">年份：{year}</span>
+              <span class="pm-chip">领域：{field}</span>
+            </div>
           </div>
-          <div class="pm-field">
-            <div class="pm-field-label">研究问题</div>
-            <div class="pm-field-value">{question}</div>
-          </div>
-          <div class="pm-field">
-            <div class="pm-field-label">方法概述</div>
-            <div class="pm-field-value">{method}</div>
-          </div>
-          <div class="pm-field">
-            <div class="pm-field-label">实验数据集</div>
-            <div class="pm-field-value">{datasets}</div>
+          <div class="pm-card-body">
+            <div class="pm-field">
+              <div class="pm-field-label">研究问题</div>
+              <div class="pm-field-value">{question}</div>
+            </div>
+            <div class="pm-field">
+              <div class="pm-field-label">方法概述</div>
+              <div class="pm-field-value">{method}</div>
+            </div>
+            <div class="pm-field">
+              <div class="pm-field-label">实验数据集</div>
+              <div class="pm-field-value">{datasets}</div>
+            </div>
           </div>
         </div>
         """,
@@ -977,23 +1416,29 @@ def render_card_library_page() -> None:
             render_pdf_viewer(selected_card.get("save_path"))
 
 
-def require_app_password() -> bool:
-    """Gate the app with an optional password for cloud deployments."""
-    if not settings.app_password:
+def feedback_admin_password() -> str:
+    """Return the feedback-page administrator password."""
+    return (os.getenv("PAPERMATE_ADMIN_PASSWORD") or settings.app_password or "").strip()
+
+
+def require_feedback_admin_password() -> bool:
+    """Require an administrator password before showing feedback records."""
+    admin_password = feedback_admin_password()
+    if not admin_password:
+        st.error("反馈记录页需要管理员密码，请配置 PAPERMATE_ADMIN_PASSWORD 或 PAPERMATE_APP_PASSWORD。")
+        return False
+
+    if st.session_state.get("feedback_admin_authenticated"):
         return True
 
-    if st.session_state.get("app_authenticated"):
-        return True
-
-    st.title(settings.app_name)
-    st.caption("请输入访问密码。")
-    password = st.text_input("访问密码", type="password")
-    if st.button("进入", type="primary"):
-        if hmac.compare_digest(password, settings.app_password):
-            st.session_state["app_authenticated"] = True
+    st.subheader("管理员验证")
+    password = st.text_input("管理员密码", type="password", key="feedback_admin_password")
+    if st.button("查看反馈记录", type="primary", use_container_width=True):
+        if hmac.compare_digest(password, admin_password):
+            st.session_state["feedback_admin_authenticated"] = True
             st.rerun()
         else:
-            st.error("访问密码不正确。")
+            st.error("管理员密码不正确。")
 
     return False
 
@@ -1002,6 +1447,8 @@ def render_feedback_records_page() -> None:
     """Render saved user feedback and bad cases."""
     render_header()
     st.subheader("反馈记录")
+    if not require_feedback_admin_password():
+        return
 
     feedback_rows = list_feedback_records()
     bad_case_rows = list_bad_cases()
@@ -1079,19 +1526,26 @@ def render_app() -> None:
     """Render the PaperMate app."""
     st.set_page_config(page_title=settings.app_name, layout="wide")
     inject_styles()
-    if not require_app_password():
-        return
 
     init_db()
 
+    st.sidebar.markdown(
+        """
+        <div class="pm-sidebar-brand">
+          <div class="pm-sidebar-brand-title">PaperMate</div>
+          <div class="pm-sidebar-brand-subtitle">论文阅读、问答、卡片和反馈管理</div>
+        </div>
+        <div class="pm-sidebar-section">工作区</div>
+        """,
+        unsafe_allow_html=True,
+    )
     page = st.sidebar.radio(
         "页面",
         ["论文工作台", "文献卡片库", "反馈记录"],
         label_visibility="collapsed",
     )
 
-    st.sidebar.markdown("### PaperMate")
-    st.sidebar.caption("PDF 转 Markdown · RAG 问答 · 文献卡片")
+    st.sidebar.caption("PDF 转 Markdown · Hybrid RAG · 文献卡片")
 
     if page == "论文工作台":
         render_workspace_page()
