@@ -35,6 +35,24 @@ def init_db(db_path: str | Path | None = None) -> None:
     with get_db_connection(db_path) as connection:
         connection.executescript(
             """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_login_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS card_libraries (
+                library_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+                UNIQUE (user_id, name)
+            );
+
             CREATE TABLE IF NOT EXISTS papers (
                 paper_id TEXT PRIMARY KEY,
                 file_name TEXT NOT NULL,
@@ -101,6 +119,8 @@ def init_db(db_path: str | Path | None = None) -> None:
 
             CREATE TABLE IF NOT EXISTS literature_cards (
                 card_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                library_id INTEGER,
                 paper_id TEXT NOT NULL,
                 title TEXT NOT NULL DEFAULT '',
                 authors TEXT NOT NULL DEFAULT '',
@@ -112,8 +132,13 @@ def init_db(db_path: str | Path | None = None) -> None:
                 markdown TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+                FOREIGN KEY (library_id) REFERENCES card_libraries (library_id) ON DELETE SET NULL,
                 FOREIGN KEY (paper_id) REFERENCES papers (paper_id) ON DELETE CASCADE
             );
+
+            CREATE INDEX IF NOT EXISTS idx_card_libraries_user_id
+                ON card_libraries (user_id);
 
             CREATE INDEX IF NOT EXISTS idx_literature_cards_updated_at
                 ON literature_cards (updated_at DESC);
@@ -153,6 +178,8 @@ def ensure_schema_migrations(connection: sqlite3.Connection) -> None:
         connection,
         "literature_cards",
         {
+            "user_id": "INTEGER",
+            "library_id": "INTEGER",
             "title": "TEXT NOT NULL DEFAULT ''",
             "authors": "TEXT NOT NULL DEFAULT ''",
             "year": "TEXT NOT NULL DEFAULT ''",
@@ -163,6 +190,18 @@ def ensure_schema_migrations(connection: sqlite3.Connection) -> None:
             "markdown": "TEXT NOT NULL DEFAULT ''",
             "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
         },
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_card_libraries_user_id
+            ON card_libraries (user_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_literature_cards_user_library
+            ON literature_cards (user_id, library_id, updated_at DESC)
+        """
     )
 
 

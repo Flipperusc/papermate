@@ -18,6 +18,7 @@ from uuid import uuid4
 import streamlit as st
 
 from config import settings
+from src.auth_service import authenticate_user, create_user, get_user_by_id
 from src.card_pipeline import generate_literature_card
 from src.chunker import CHUNKER_VERSION, chunk_pages
 from src.db import ensure_data_directories, init_db, save_paper_and_chunks, save_qa_log
@@ -34,12 +35,18 @@ from src.errors import (
 from src.feedback_service import FEEDBACK_OPTIONS, list_bad_cases, list_feedback_records, save_feedback
 from src.literature_card_service import (
     CARD_FIELD_LABELS,
+    claim_unassigned_literature_cards,
+    create_card_library,
     delete_literature_card,
     delete_literature_cards,
+    ensure_default_card_library,
+    get_card_library,
     get_literature_card,
     get_literature_card_by_paper,
+    list_card_libraries,
     list_literature_cards,
     save_literature_card,
+    update_card_library,
     update_literature_card,
 )
 from src.logger import get_logger
@@ -97,9 +104,23 @@ def inject_styles() -> None:
             background: var(--pm-bg) !important;
             color: var(--pm-text) !important;
         }
-        [data-testid="stToolbar"],
         [data-testid="stDecoration"] {
             display: none;
+        }
+        [data-testid="stToolbar"],
+        [data-testid="collapsedControl"],
+        [data-testid="stSidebarCollapsedControl"] {
+            visibility: visible !important;
+            opacity: 1 !important;
+            pointer-events: auto !important;
+            z-index: 1000000 !important;
+        }
+        [data-testid="collapsedControl"] button,
+        [data-testid="stSidebarCollapsedControl"] button {
+            border: 1px solid var(--pm-border) !important;
+            border-radius: 8px !important;
+            background: #ffffff !important;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.10) !important;
         }
         .block-container {
             padding-top: 1rem;
@@ -305,10 +326,255 @@ def inject_styles() -> None:
             border-radius: 8px;
             background: #f8fafc;
         }
+        .pm-auth-shell {
+            max-width: 960px;
+            margin: 24px auto 0 auto;
+            display: grid;
+            grid-template-columns: 0.92fr 1.08fr;
+            gap: 22px;
+            align-items: stretch;
+        }
+        .pm-auth-panel,
+        .pm-auth-copy,
+        .pm-library-panel {
+            border: 1px solid var(--pm-border);
+            border-radius: 8px;
+            background: #ffffff;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+        }
+        .pm-auth-copy {
+            padding: 22px;
+            background: #f2faf6;
+            border-color: #cae7dc;
+        }
+        .pm-auth-copy h2 {
+            font-size: 24px;
+            margin: 0 0 8px 0;
+        }
+        .pm-auth-copy p {
+            color: #3f5f55;
+            line-height: 1.72;
+            margin: 0 0 12px 0;
+        }
+        .pm-auth-panel {
+            padding: 18px 20px 8px 20px;
+        }
+        .pm-user-pill {
+            border: 1px solid #cfe4dc;
+            border-radius: 8px;
+            background: #ecf7f2;
+            padding: 8px 10px;
+            color: #235347;
+            font-size: 13px;
+            margin: 8px 0 12px 0;
+        }
+        .pm-library-panel {
+            padding: 14px 16px;
+            margin-bottom: 16px;
+        }
+        .pm-library-panel h3 {
+            font-size: 18px;
+            margin: 0 0 8px 0;
+        }
+        .pm-library-panel p {
+            margin: 0;
+            color: var(--pm-muted);
+            line-height: 1.55;
+        }
+        div[data-testid="stDialog"] div[role="dialog"] {
+            border-radius: 14px;
+            border: 1px solid #cae7dc;
+            box-shadow: 0 22px 70px rgba(15, 23, 42, 0.24);
+        }
+        .pm-welcome {
+            padding: 4px 2px 2px 2px;
+        }
+        .pm-welcome-kicker {
+            display: inline-flex;
+            border-radius: 999px;
+            padding: 4px 10px;
+            background: #ecf7f2;
+            color: #0f7f66;
+            font-size: 12px;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+        .pm-welcome h2 {
+            font-size: 25px;
+            margin: 0 0 8px 0;
+        }
+        .pm-welcome p,
+        .pm-welcome li {
+            color: #475569;
+            line-height: 1.68;
+        }
+        @media (max-width: 860px) {
+            .pm-auth-shell {
+                grid-template-columns: 1fr;
+                margin-top: 12px;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def current_user() -> dict[str, Any] | None:
+    """Return the authenticated user stored in the Streamlit session."""
+    user = st.session_state.get("current_user")
+    if not isinstance(user, dict) or not user.get("user_id"):
+        return None
+
+    user_id = int(user["user_id"])
+    fresh_user = get_user_by_id(user_id)
+    if not fresh_user:
+        st.session_state.pop("current_user", None)
+        return None
+    return {"user_id": user_id, "username": str(fresh_user["username"])}
+
+
+def current_user_id() -> int:
+    """Return the current user id or raise if the app is not authenticated."""
+    user = current_user()
+    if not user:
+        raise RuntimeError("Current user is required.")
+    return int(user["user_id"])
+
+
+def set_current_user(user: dict[str, Any]) -> None:
+    """Persist authenticated user data in session state."""
+    st.session_state["current_user"] = {
+        "user_id": int(user["user_id"]),
+        "username": str(user["username"]),
+    }
+
+
+def prepare_user_workspace(user_id: int) -> None:
+    """Ensure required per-user card storage exists."""
+    ensure_default_card_library(user_id)
+    claim_unassigned_literature_cards(user_id)
+
+
+def clear_authenticated_session() -> None:
+    """Clear user-scoped session state on logout."""
+    keep_keys = {"welcome_seen"}
+    for key in list(st.session_state.keys()):
+        if key not in keep_keys:
+            del st.session_state[key]
+
+
+def render_welcome_dialog() -> None:
+    """Show the first-visit PaperMate intro dialog."""
+    if st.session_state.get("welcome_seen"):
+        return
+
+    @st.dialog("欢迎来到 PaperMate")
+    def welcome() -> None:
+        st.markdown(
+            """
+            <div class="pm-welcome">
+              <div class="pm-welcome-kicker">你的论文搭子</div>
+              <h2>把 PDF 丢进来，剩下交给 PaperMate 。</h2>
+              <p>我会帮你把论文转成 Markdown，抽出可检索的片段，严格根据论文本身回答问题，还能把重点整理成文献卡片。</p>
+              <ul>
+                <li>上传 PDF，解析正文和图片。</li>
+                <li>构建 Hybrid RAG 索引，问问题不靠玄学。</li>
+                <li>把卡片存进你自己的卡片库，按主题分门别类。</li>
+              </ul>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("开始整理我的论文", type="primary", use_container_width=True):
+            st.session_state["welcome_seen"] = True
+            st.rerun()
+
+    welcome()
+
+
+def render_auth_page() -> None:
+    """Render login and registration controls."""
+    render_header()
+    st.markdown(
+        """
+        <div class="pm-auth-shell">
+          <div class="pm-auth-copy">
+            <h2>先认个门牌号</h2>
+            <p>登录后，文献卡片会只进你的库。别人看不到你的卡片，你也不会误删别人的整理成果。</p>
+            <p>新用户注册后会自动获得一个“默认卡片库”，之后可以继续创建新的主题库。</p>
+          </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    login_tab, register_tab = st.tabs(["登录", "注册"])
+
+    with login_tab:
+        with st.form("login_form"):
+            username = st.text_input("用户名", key="login_username")
+            password = st.text_input("密码", type="password", key="login_password")
+            submitted = st.form_submit_button("登录", type="primary", use_container_width=True)
+
+        if submitted:
+            user = authenticate_user(username, password)
+            if not user:
+                st.error("用户名或密码不正确。")
+                return
+            prepare_user_workspace(int(user["user_id"]))
+            set_current_user(user)
+            st.success("登录成功。")
+            st.rerun()
+
+    with register_tab:
+        with st.form("register_form"):
+            username = st.text_input("用户名", key="register_username")
+            password = st.text_input("密码", type="password", key="register_password")
+            password_confirm = st.text_input("确认密码", type="password", key="register_password_confirm")
+            submitted = st.form_submit_button("注册并进入", type="primary", use_container_width=True)
+
+        if submitted:
+            if password != password_confirm:
+                st.error("两次输入的密码不一致。")
+                return
+            try:
+                user = create_user(username, password)
+                prepare_user_workspace(int(user["user_id"]))
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                st.error(str(exc) or "注册失败，请稍后再试。")
+                return
+            set_current_user(user)
+            st.success("注册成功。")
+            st.rerun()
+
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def render_sidebar_navigation(user: dict[str, Any]) -> str:
+    """Render the sidebar and return the selected page."""
+    st.sidebar.markdown(
+        f"""
+        <div class="pm-sidebar-brand">
+          <div class="pm-sidebar-brand-title">PaperMate</div>
+          <div class="pm-sidebar-brand-subtitle">论文阅读、问答、卡片和反馈管理</div>
+        </div>
+        <div class="pm-user-pill">当前用户：{html.escape(str(user["username"]))}</div>
+        <div class="pm-sidebar-section">工作区</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    page = st.sidebar.radio(
+        "页面",
+        ["论文工作台", "文献卡片库", "反馈记录"],
+        label_visibility="collapsed",
+    )
+
+    st.sidebar.caption("PDF 转 Markdown · Hybrid RAG · 文献卡片")
+    if st.sidebar.button("退出登录", use_container_width=True):
+        clear_authenticated_session()
+        st.rerun()
+
+    return page
 
 
 def format_file_size(size_bytes: int) -> str:
@@ -765,7 +1031,12 @@ def render_extracted_images(images: list[dict[str, str]]) -> None:
             st.image(str(image_path), use_container_width=True)
 
 
-def render_literature_card_save(paper_id: str, chunks: list[dict[str, Any]], db_save_failed: bool) -> None:
+def render_literature_card_save(
+    paper_id: str,
+    chunks: list[dict[str, Any]],
+    db_save_failed: bool,
+    user_id: int,
+) -> None:
     """Render literature card generation and persistence button."""
     st.markdown("#### 文献卡片")
     if not chunks:
@@ -774,23 +1045,65 @@ def render_literature_card_save(paper_id: str, chunks: list[dict[str, Any]], db_
     if db_save_failed:
         st.warning("数据库保存失败，文献卡片可能无法基于完整 chunks 生成。")
 
-    existing_card = get_literature_card_by_paper(paper_id)
+    try:
+        libraries = list_card_libraries(user_id)
+    except (OSError, sqlite3.Error):
+        st.error("卡片库读取失败，请检查 SQLite 数据库权限。")
+        return
+
+    if not libraries:
+        st.warning("当前用户还没有可用卡片库。")
+        return
+
+    selected_library_id = st.selectbox(
+        "保存到卡片库",
+        options=[int(library["library_id"]) for library in libraries],
+        format_func=lambda library_id: next(
+            f"{library['name']}（{library.get('card_count', 0)} 张）"
+            for library in libraries
+            if int(library["library_id"]) == int(library_id)
+        ),
+        key=f"target_library_{paper_id}",
+    )
+
+    with st.expander("新建卡片库", expanded=False):
+        with st.form(key=f"create_library_for_{paper_id}"):
+            new_library_name = st.text_input("卡片库名称", placeholder="例如：综述必读、方法对照、毕业论文核心文献")
+            submitted = st.form_submit_button("创建卡片库", type="primary", use_container_width=True)
+        if submitted:
+            try:
+                create_card_library(user_id, new_library_name)
+            except sqlite3.IntegrityError:
+                st.error("这个卡片库名字已经存在。")
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                st.error(str(exc) or "卡片库创建失败。")
+            else:
+                st.success("卡片库已创建。")
+                st.rerun()
+
     if st.button("生成并保存为新文献卡片", type="primary", use_container_width=True, key=f"save_card_{paper_id}"):
         try:
             with st.spinner("正在生成文献卡片并保存..."):
                 markdown = generate_literature_card(paper_id)
-                card_id = save_literature_card(paper_id, markdown)
-        except (LLMError, OSError, sqlite3.Error) as exc:
+                card_id = save_literature_card(
+                    paper_id,
+                    markdown,
+                    user_id=user_id,
+                    library_id=int(selected_library_id),
+                )
+        except (LLMError, ValueError, OSError, sqlite3.Error) as exc:
             if isinstance(exc, LLMError):
                 st.error(f"{exc.message}（错误码：{exc.code.value}）")
             else:
-                st.error("文献卡片保存失败，请检查 SQLite 数据库权限。")
+                st.error(str(exc) or "文献卡片保存失败，请检查 SQLite 数据库权限。")
             return
 
         st.session_state[f"saved_card_id_{paper_id}"] = card_id
-        st.success("新文献卡片已保存，可在“文献卡片库”页面查看、批量管理和编辑。")
+        library = get_card_library(int(selected_library_id), user_id)
+        library_name = library["name"] if library else "所选卡片库"
+        st.success(f"新文献卡片已保存到「{library_name}」，可在“文献卡片库”页面查看、批量管理和编辑。")
 
-    saved_card = get_literature_card_by_paper(paper_id)
+    saved_card = get_literature_card_by_paper(paper_id, user_id=user_id)
     if saved_card:
         with st.expander("最近保存的卡片预览", expanded=False):
             render_card_visual(saved_card)
@@ -1192,6 +1505,7 @@ def render_workspace_page() -> None:
             processed_pdf["saved_file"]["paper_id"],
             processed_pdf["chunks"],
             processed_pdf["db_save_failed"],
+            current_user_id(),
         )
 
 
@@ -1215,6 +1529,7 @@ def render_card_visual(card: dict[str, Any]) -> None:
     authors = escaped_text(card.get("authors"))
     year = escaped_text(card.get("year"))
     field = escaped_text(card.get("research_field"))
+    library_name = escaped_text(card.get("library_name") or "未分组")
     question = escaped_text(card.get("research_question"))
     method = escaped_text(card.get("method_summary"))
     datasets = escaped_text(card.get("datasets"))
@@ -1232,6 +1547,7 @@ def render_card_visual(card: dict[str, Any]) -> None:
               <span class="pm-chip">作者：{authors}</span>
               <span class="pm-chip">年份：{year}</span>
               <span class="pm-chip">领域：{field}</span>
+              <span class="pm-chip">库：{library_name}</span>
             </div>
           </div>
           <div class="pm-card-body">
@@ -1292,11 +1608,12 @@ def card_option_label(card: dict[str, Any]) -> str:
     """Build a readable label for card selection."""
     title = str(card.get("title") or "未命名论文").strip()
     year = str(card.get("year") or "年份未知").strip()
+    library_name = str(card.get("library_name") or "未分组").strip()
     file_name = str(card.get("file_name") or "PDF 未关联").strip()
-    return f"{title} · {year} · {file_name}"
+    return f"{title} · {year} · {library_name} · {file_name}"
 
 
-def render_card_edit_form(card: dict[str, Any]) -> None:
+def render_card_edit_form(card: dict[str, Any], user_id: int) -> None:
     """Render edit form for one literature card."""
     with st.form(key=f"edit_card_{card['card_id']}"):
         values: dict[str, str] = {}
@@ -1311,7 +1628,7 @@ def render_card_edit_form(card: dict[str, Any]) -> None:
 
     if submitted:
         try:
-            update_literature_card(int(card["card_id"]), values)
+            update_literature_card(int(card["card_id"]), values, user_id=user_id)
         except (OSError, sqlite3.Error):
             st.error("文献卡片更新失败，请检查 SQLite 数据库权限。")
             return
@@ -1319,12 +1636,12 @@ def render_card_edit_form(card: dict[str, Any]) -> None:
         st.rerun()
 
 
-def render_card_delete(card_id: int) -> None:
+def render_card_delete(card_id: int, user_id: int) -> None:
     """Render delete confirmation controls."""
     confirm = st.checkbox("确认删除这张文献卡片", key=f"confirm_delete_{card_id}")
     if st.button("删除文献卡片", disabled=not confirm, use_container_width=True):
         try:
-            delete_literature_card(card_id)
+            delete_literature_card(card_id, user_id=user_id)
         except (OSError, sqlite3.Error):
             st.error("文献卡片删除失败，请检查 SQLite 数据库权限。")
             return
@@ -1332,17 +1649,107 @@ def render_card_delete(card_id: int) -> None:
         st.rerun()
 
 
-def render_card_library_page() -> None:
+def library_option_label(library: dict[str, Any]) -> str:
+    """Build a readable label for a card library option."""
+    return f"{library['name']}（{int(library.get('card_count') or 0)} 张）"
+
+
+def render_library_create_form(user_id: int, key_suffix: str = "") -> None:
+    """Render a form that creates a user-owned card library."""
+    with st.form(key=f"create_library_form{key_suffix}"):
+        new_library_name = st.text_input(
+            "新卡片库名称",
+            placeholder="例如：综述必读、方法对照、毕业论文核心文献",
+            key=f"new_library_name{key_suffix}",
+        )
+        submitted = st.form_submit_button("创建卡片库", type="primary", use_container_width=True)
+
+    if submitted:
+        try:
+            create_card_library(user_id, new_library_name)
+        except sqlite3.IntegrityError:
+            st.error("这个卡片库名字已经存在。")
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            st.error(str(exc) or "卡片库创建失败。")
+        else:
+            st.success("卡片库已创建。")
+            st.rerun()
+
+
+def render_library_rename_form(user_id: int, library: dict[str, Any]) -> None:
+    """Render a form that renames a user-owned card library."""
+    with st.form(key=f"rename_library_{library['library_id']}"):
+        new_name = st.text_input("新的卡片库名称", value=str(library["name"]))
+        submitted = st.form_submit_button("保存名称", type="primary", use_container_width=True)
+
+    if submitted:
+        try:
+            update_card_library(int(library["library_id"]), user_id, new_name)
+        except sqlite3.IntegrityError:
+            st.error("这个卡片库名字已经存在。")
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            st.error(str(exc) or "卡片库重命名失败。")
+        else:
+            st.success("卡片库名称已更新。")
+            st.rerun()
+
+
+def render_card_library_page(user_id: int) -> None:
     """Render saved literature-card management page."""
     render_header()
     st.subheader("文献卡片库")
 
-    cards = list_literature_cards()
-    if not cards:
-        st.info("还没有保存文献卡片。请先在“论文工作台”上传 PDF，并点击“生成并保存文献卡片”。")
+    try:
+        libraries = list_card_libraries(user_id)
+    except (OSError, sqlite3.Error):
+        st.error("卡片库读取失败，请检查 SQLite 数据库权限。")
         return
 
-    st.caption(f"共 {len(cards)} 张文献卡片。支持多选批量删除，也可以选择单张卡片查看、修改和打开对应 PDF。")
+    library_count = len(libraries)
+    card_total = sum(int(library.get("card_count") or 0) for library in libraries)
+    st.markdown(
+        f"""
+        <div class="pm-library-panel">
+          <h3>你的卡片，只归你管</h3>
+          <p>当前共有 {library_count} 个卡片库、{card_total} 张文献卡片。可以按课程、课题或论文阶段拆成不同库，保存时直接选目标库。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    library_options = [0, *[int(library["library_id"]) for library in libraries]]
+    selected_library_id = st.selectbox(
+        "查看范围",
+        options=library_options,
+        format_func=lambda library_id: "全部卡片库" if int(library_id) == 0 else library_option_label(
+            next(library for library in libraries if int(library["library_id"]) == int(library_id))
+        ),
+    )
+    library_filter = None if int(selected_library_id) == 0 else int(selected_library_id)
+    selected_library = (
+        next((library for library in libraries if int(library["library_id"]) == library_filter), None)
+        if library_filter
+        else None
+    )
+
+    tools_col, rename_col = st.columns([0.48, 0.52], gap="large")
+    with tools_col:
+        with st.expander("创建新卡片库", expanded=False):
+            render_library_create_form(user_id, key_suffix="_library_page")
+    with rename_col:
+        if selected_library:
+            with st.expander("重命名当前卡片库", expanded=False):
+                render_library_rename_form(user_id, selected_library)
+        else:
+            st.caption("选择某个具体卡片库后，可以在这里修改它的名字。")
+
+    cards = list_literature_cards(user_id=user_id, library_id=library_filter)
+    if not cards:
+        st.info("这个范围里还没有文献卡片。去“论文工作台”上传 PDF，生成卡片时选一个目标库即可。")
+        return
+
+    scope_name = selected_library["name"] if selected_library else "全部卡片库"
+    st.caption(f"「{scope_name}」共 {len(cards)} 张文献卡片。支持多选批量删除，也可以选择单张卡片查看、修改和打开对应 PDF。")
 
     with st.expander("批量管理", expanded=False):
         selected_batch_ids = st.multiselect(
@@ -1359,20 +1766,21 @@ def render_card_library_page() -> None:
             use_container_width=True,
         ):
             try:
-                deleted_count = delete_literature_cards(selected_batch_ids)
+                deleted_count = delete_literature_cards(selected_batch_ids, user_id=user_id)
             except (OSError, sqlite3.Error):
                 st.error("批量删除失败，请检查 SQLite 数据库权限。")
                 return
             st.success(f"已删除 {deleted_count} 张文献卡片。")
             st.rerun()
 
-    with st.expander("全部卡片概览", expanded=True):
+    with st.expander("卡片概览", expanded=True):
         grid_columns = st.columns(2)
         for index, card in enumerate(cards):
             with grid_columns[index % 2]:
                 render_card_visual(card)
 
     list_col, detail_col = st.columns([0.38, 0.62], gap="large")
+    selected_card: dict[str, Any] | None = None
 
     with list_col:
         st.markdown("#### 单张管理")
@@ -1384,8 +1792,9 @@ def render_card_library_page() -> None:
             ),
             label_visibility="collapsed",
         )
-        selected_card = get_literature_card(int(selected_card_id))
+        selected_card = get_literature_card(int(selected_card_id), user_id=user_id)
         if selected_card:
+            st.caption(f"所属卡片库：{selected_card.get('library_name') or '未分组'}")
             st.caption(f"paper_id：{selected_card['paper_id']}")
             st.caption(f"更新时间：{selected_card['updated_at']}")
             st.caption(f"PDF：{selected_card.get('file_name') or '未关联'}")
@@ -1408,9 +1817,9 @@ def render_card_library_page() -> None:
                 )
 
         with tab_edit:
-            render_card_edit_form(selected_card)
+            render_card_edit_form(selected_card, user_id)
             st.divider()
-            render_card_delete(int(selected_card["card_id"]))
+            render_card_delete(int(selected_card["card_id"]), user_id)
 
         with tab_pdf:
             render_pdf_viewer(selected_card.get("save_path"))
@@ -1524,33 +1933,24 @@ def render_feedback_records_page() -> None:
 
 def render_app() -> None:
     """Render the PaperMate app."""
-    st.set_page_config(page_title=settings.app_name, layout="wide")
+    st.set_page_config(page_title=settings.app_name, layout="wide", initial_sidebar_state="expanded")
     inject_styles()
 
     init_db()
+    render_welcome_dialog()
 
-    st.sidebar.markdown(
-        """
-        <div class="pm-sidebar-brand">
-          <div class="pm-sidebar-brand-title">PaperMate</div>
-          <div class="pm-sidebar-brand-subtitle">论文阅读、问答、卡片和反馈管理</div>
-        </div>
-        <div class="pm-sidebar-section">工作区</div>
-        """,
-        unsafe_allow_html=True,
-    )
-    page = st.sidebar.radio(
-        "页面",
-        ["论文工作台", "文献卡片库", "反馈记录"],
-        label_visibility="collapsed",
-    )
+    user = current_user()
+    if not user:
+        render_auth_page()
+        return
 
-    st.sidebar.caption("PDF 转 Markdown · Hybrid RAG · 文献卡片")
+    prepare_user_workspace(int(user["user_id"]))
+    page = render_sidebar_navigation(user)
 
     if page == "论文工作台":
         render_workspace_page()
     elif page == "文献卡片库":
-        render_card_library_page()
+        render_card_library_page(int(user["user_id"]))
     else:
         render_feedback_records_page()
 
