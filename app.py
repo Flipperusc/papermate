@@ -1464,26 +1464,32 @@ def render_workspace_page() -> None:
     )
 
     if uploaded_file is None:
-        st.info("上传 PDF 后，点击开始解析；解析完成后页面会显示完整 Markdown，右侧可以进行论文问答。")
-        return
-
-    signature = get_uploaded_file_signature(uploaded_file)
-    cached_pdf = processed_pdf if processed_pdf and processed_pdf.get("signature") == signature else None
-    st.caption(f"已选择文件：{uploaded_file.name}，大小：{format_file_size(len(uploaded_file.getvalue()))}")
-
-    if cached_pdf:
-        processed_pdf = cached_pdf
+        if processed_pdf:
+            saved_file = processed_pdf.get("saved_file", {})
+            st.info("已恢复当前会话中的论文工作台内容。需要换论文时，重新上传 PDF 即可。")
+            if saved_file.get("file_name"):
+                st.caption(f"当前论文：{saved_file['file_name']}")
+        else:
+            st.info("上传 PDF 后，点击开始解析；解析完成后页面会显示完整 Markdown，右侧可以进行论文问答。")
+            return
     else:
-        processed_pdf = None
-        st.info("PDF 已上传到页面，点击下方按钮后开始解析。MinerU 解析可能需要数十秒到数分钟。")
-        if st.button("开始解析 PDF", type="primary", use_container_width=True, key="start_pdf_parse"):
-            try:
-                with st.spinner("正在保存 PDF 并转换为 Markdown..."):
-                    processed_pdf = process_uploaded_pdf(uploaded_file)
-            except (UploadError, PdfParseError, MinerUError) as exc:
-                logger.exception("PDF upload or parse failed.")
-                st.error(f"{exc.message}（错误码：{exc.code.value}）")
-                processed_pdf = None
+        signature = get_uploaded_file_signature(uploaded_file)
+        cached_pdf = processed_pdf if processed_pdf and processed_pdf.get("signature") == signature else None
+        st.caption(f"已选择文件：{uploaded_file.name}，大小：{format_file_size(len(uploaded_file.getvalue()))}")
+
+        if cached_pdf:
+            processed_pdf = cached_pdf
+        else:
+            processed_pdf = None
+            st.info("PDF 已上传到页面，点击下方按钮后开始解析。MinerU 解析可能需要数十秒到数分钟。")
+            if st.button("开始解析 PDF", type="primary", use_container_width=True, key="start_pdf_parse"):
+                try:
+                    with st.spinner("正在保存 PDF 并转换为 Markdown..."):
+                        processed_pdf = process_uploaded_pdf(uploaded_file)
+                except (UploadError, PdfParseError, MinerUError) as exc:
+                    logger.exception("PDF upload or parse failed.")
+                    st.error(f"{exc.message}（错误码：{exc.code.value}）")
+                    processed_pdf = None
 
     if not processed_pdf:
         return
