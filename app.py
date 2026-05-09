@@ -18,6 +18,7 @@ from uuid import uuid4
 import streamlit as st
 
 from config import settings
+from src import __version__
 from src.auth_service import authenticate_user, create_user, get_user_by_id
 from src.card_pipeline import generate_literature_card
 from src.chunker import CHUNKER_VERSION, chunk_pages
@@ -420,6 +421,778 @@ def inject_styles() -> None:
     )
 
 
+def render_status_badge(text: str, type: str = "default") -> str:
+    """Return reusable status-badge HTML."""
+    safe_type = html.escape(str(type or "default"))
+    return f'<span class="pm-badge pm-badge-{safe_type}">{html.escape(str(text))}</span>'
+
+
+def inject_global_css() -> None:
+    """Inject the modern PaperMate UI theme."""
+    st.markdown(
+        """
+        <style>
+        :root {
+            --pm-bg: #f6f7fb;
+            --pm-surface: #ffffff;
+            --pm-surface-soft: #f8fafc;
+            --pm-border: #e5e7eb;
+            --pm-border-strong: #d1d5db;
+            --pm-text: #111827;
+            --pm-muted: #6b7280;
+            --pm-faint: #9ca3af;
+            --pm-primary: #4f46e5;
+            --pm-primary-strong: #4338ca;
+            --pm-secondary: #7c3aed;
+            --pm-blue: #2563eb;
+            --pm-success: #16a34a;
+            --pm-warning: #f59e0b;
+            --pm-error: #dc2626;
+            --pm-shadow: 0 16px 38px rgba(15, 23, 42, 0.08);
+            --pm-shadow-soft: 0 8px 24px rgba(15, 23, 42, 0.06);
+        }
+        .stApp,
+        html,
+        body,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stHeader"] {
+            background: var(--pm-bg) !important;
+            color: var(--pm-text) !important;
+        }
+        [data-testid="stDecoration"] {
+            display: none;
+        }
+        [data-testid="stToolbar"],
+        [data-testid="collapsedControl"],
+        [data-testid="stSidebarCollapsedControl"] {
+            visibility: visible !important;
+            opacity: 1 !important;
+            pointer-events: auto !important;
+            z-index: 1000000 !important;
+        }
+        [data-testid="collapsedControl"] button,
+        [data-testid="stSidebarCollapsedControl"] button {
+            border: 1px solid var(--pm-border) !important;
+            border-radius: 10px !important;
+            background: #ffffff !important;
+            box-shadow: var(--pm-shadow-soft) !important;
+        }
+        .block-container {
+            max-width: 1560px;
+            padding-top: 1.2rem;
+            padding-bottom: 3rem;
+        }
+        section[data-testid="stSidebar"] {
+            background: #ffffff !important;
+            border-right: 1px solid var(--pm-border);
+        }
+        section[data-testid="stSidebar"] > div {
+            padding-top: 18px;
+            padding-bottom: 18px;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] {
+            display: grid;
+            gap: 8px;
+            margin-top: 12px;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label {
+            border-radius: 12px;
+            padding: 9px 10px;
+            color: var(--pm-text);
+            border: 1px solid transparent;
+            transition: background 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
+            background: #f4f6fb;
+            border-color: var(--pm-border);
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+            background: #eef2ff;
+            border-color: #c7d2fe;
+            box-shadow: inset 3px 0 0 var(--pm-primary);
+        }
+        h1, h2, h3, h4, h5 {
+            color: var(--pm-text);
+            letter-spacing: 0;
+        }
+        div[data-testid="stMetric"] {
+            background: var(--pm-surface);
+            border: 1px solid var(--pm-border);
+            border-radius: 12px;
+            padding: 10px 12px;
+        }
+        .stButton > button,
+        .stDownloadButton > button,
+        button[kind="primary"] {
+            border-radius: 10px;
+            font-weight: 650;
+            min-height: 2.48rem;
+        }
+        .stButton > button[kind="primary"],
+        .stDownloadButton > button[kind="primary"] {
+            background: var(--pm-primary);
+            border-color: var(--pm-primary);
+        }
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+            border-color: var(--pm-primary);
+        }
+        div[data-testid="stExpander"] {
+            border-color: var(--pm-border);
+            border-radius: 14px;
+            background: var(--pm-surface);
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+        }
+        div[data-testid="stTextArea"] textarea,
+        div[data-testid="stTextInput"] input,
+        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+            border-radius: 10px;
+            border-color: var(--pm-border);
+            background: #ffffff;
+            color: var(--pm-text);
+        }
+        div[data-testid="stFileUploader"] {
+            border: 1px dashed #c7d2fe;
+            border-radius: 16px;
+            padding: 10px;
+            background: linear-gradient(180deg, #ffffff 0%, #f8faff 100%);
+        }
+        .pm-sidebar-brand {
+            border-radius: 16px;
+            padding: 14px 14px 16px 14px;
+            background: linear-gradient(135deg, #eef2ff 0%, #faf5ff 100%);
+            border: 1px solid #ddd6fe;
+            margin-bottom: 14px;
+        }
+        .pm-sidebar-logo {
+            width: 34px;
+            height: 34px;
+            display: inline-grid;
+            place-items: center;
+            border-radius: 10px;
+            background: var(--pm-primary);
+            color: #ffffff;
+            font-weight: 800;
+            margin-bottom: 10px;
+        }
+        .pm-sidebar-brand-title {
+            font-size: 20px;
+            font-weight: 800;
+            line-height: 1.2;
+            color: var(--pm-text);
+            margin-bottom: 3px;
+        }
+        .pm-sidebar-brand-subtitle {
+            font-size: 12px;
+            color: var(--pm-muted);
+            line-height: 1.45;
+        }
+        .pm-sidebar-section {
+            margin: 16px 0 6px 0;
+            color: var(--pm-muted);
+            font-size: 12px;
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+        .pm-sidebar-footer {
+            border-top: 1px solid var(--pm-border);
+            margin-top: 16px;
+            padding-top: 14px;
+            color: var(--pm-muted);
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .pm-hero {
+            border: 1px solid #dbeafe;
+            border-radius: 18px;
+            padding: 22px 24px;
+            background:
+                radial-gradient(circle at 0% 0%, rgba(79, 70, 229, 0.13), transparent 34%),
+                linear-gradient(135deg, #ffffff 0%, #f8faff 100%);
+            margin-bottom: 18px;
+            box-shadow: var(--pm-shadow-soft);
+        }
+        .pm-hero h1 {
+            margin: 0 0 4px 0;
+            font-size: 31px;
+            letter-spacing: 0;
+        }
+        .pm-hero p {
+            margin: 0;
+            color: var(--pm-muted);
+            line-height: 1.65;
+        }
+        .pm-hero-top {
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            align-items: flex-start;
+            flex-wrap: wrap;
+        }
+        .pm-badges,
+        .pm-toolbar,
+        .pm-meta {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .pm-badge {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 999px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 800;
+            border: 1px solid var(--pm-border);
+            background: #f8fafc;
+            color: #374151;
+            white-space: nowrap;
+        }
+        .pm-badge-default { background: #f8fafc; color: #374151; border-color: #e5e7eb; }
+        .pm-badge-info { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+        .pm-badge-primary { background: #eef2ff; color: #4338ca; border-color: #c7d2fe; }
+        .pm-badge-success { background: #ecfdf5; color: #047857; border-color: #bbf7d0; }
+        .pm-badge-warning { background: #fffbeb; color: #b45309; border-color: #fde68a; }
+        .pm-badge-error { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+        .pm-grid-metrics {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 12px;
+            margin: 14px 0 18px 0;
+        }
+        .pm-metric-card {
+            background: #ffffff;
+            border: 1px solid var(--pm-border);
+            border-radius: 16px;
+            padding: 14px 14px 13px 14px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+            min-height: 96px;
+        }
+        .pm-metric-card-success { border-color: #bbf7d0; }
+        .pm-metric-card-warning { border-color: #fde68a; }
+        .pm-metric-card-error { border-color: #fecaca; }
+        .pm-metric-label {
+            font-size: 12px;
+            font-weight: 800;
+            color: var(--pm-muted);
+            margin-bottom: 8px;
+        }
+        .pm-metric-value {
+            font-size: 19px;
+            line-height: 1.25;
+            font-weight: 800;
+            color: var(--pm-text);
+            word-break: break-word;
+        }
+        .pm-metric-helper {
+            margin-top: 7px;
+            font-size: 12px;
+            color: var(--pm-muted);
+            line-height: 1.35;
+        }
+        .pm-section-card,
+        .pm-upload-card,
+        .pm-reader-card,
+        .pm-ask-card,
+        .pm-feedback-card,
+        .pm-error-card,
+        .pm-empty-state {
+            background: #ffffff;
+            border: 1px solid var(--pm-border);
+            border-radius: 18px;
+            box-shadow: var(--pm-shadow-soft);
+            padding: 18px;
+            margin-bottom: 16px;
+        }
+        .pm-section-heading {
+            display: flex;
+            justify-content: space-between;
+            gap: 14px;
+            align-items: flex-start;
+            margin-bottom: 12px;
+        }
+        .pm-section-title {
+            margin: 0;
+            font-size: 19px;
+            font-weight: 800;
+            color: var(--pm-text);
+        }
+        .pm-section-description {
+            margin: 5px 0 0 0;
+            color: var(--pm-muted);
+            font-size: 13px;
+            line-height: 1.55;
+        }
+        .pm-reader-shell {
+            max-height: 78vh;
+            overflow-y: auto;
+            padding: 6px 8px 6px 2px;
+        }
+        .pm-reader-shell h1,
+        .pm-reader-shell h2,
+        .pm-reader-shell h3 {
+            color: var(--pm-text);
+            margin-top: 1.3em;
+        }
+        .pm-reader-shell p,
+        .pm-reader-shell li {
+            font-size: 15px;
+            line-height: 1.8;
+            color: #1f2937;
+        }
+        .pm-empty-state {
+            text-align: center;
+            padding: 26px 22px;
+            box-shadow: none;
+            background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+        }
+        .pm-empty-icon {
+            width: 42px;
+            height: 42px;
+            margin: 0 auto 10px auto;
+            display: grid;
+            place-items: center;
+            border-radius: 14px;
+            background: #eef2ff;
+            color: #4338ca;
+            font-weight: 800;
+        }
+        .pm-empty-title {
+            font-weight: 800;
+            font-size: 18px;
+            color: var(--pm-text);
+            margin-bottom: 6px;
+        }
+        .pm-empty-description {
+            color: var(--pm-muted);
+            line-height: 1.65;
+            max-width: 620px;
+            margin: 0 auto;
+        }
+        .pm-empty-action {
+            display: inline-flex;
+            margin-top: 14px;
+            border-radius: 999px;
+            padding: 6px 12px;
+            background: #eef2ff;
+            color: #4338ca;
+            font-size: 12px;
+            font-weight: 800;
+        }
+        .pm-chat-message {
+            border-radius: 16px;
+            padding: 13px 14px;
+            margin: 10px 0;
+            border: 1px solid var(--pm-border);
+            line-height: 1.7;
+        }
+        .pm-chat-user {
+            background: #eef2ff;
+            border-color: #c7d2fe;
+            margin-left: 8%;
+        }
+        .pm-chat-assistant {
+            background: #ffffff;
+            margin-right: 5%;
+        }
+        .pm-chat-role {
+            font-size: 12px;
+            font-weight: 800;
+            color: var(--pm-muted);
+            margin-bottom: 4px;
+        }
+        .pm-reference-card {
+            border: 1px solid #dbeafe;
+            border-radius: 14px;
+            background: #ffffff;
+            padding: 14px;
+            margin: 10px 0;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        .pm-reference-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 10px;
+        }
+        .pm-reference-title {
+            font-weight: 800;
+            color: #1e3a8a;
+        }
+        .pm-reference-text {
+            color: #1f2937;
+            line-height: 1.7;
+            background: #f8fafc;
+            border-radius: 12px;
+            padding: 11px 12px;
+            border: 1px solid #eef2f7;
+            white-space: pre-wrap;
+        }
+        .pm-reference-meta {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .pm-reference-meta-item {
+            background: #f8fafc;
+            border: 1px solid #eef2f7;
+            border-radius: 10px;
+            padding: 8px;
+            font-size: 12px;
+            color: var(--pm-muted);
+        }
+        .pm-reference-meta-item strong {
+            display: block;
+            color: var(--pm-text);
+            font-size: 13px;
+            margin-top: 2px;
+            word-break: break-word;
+        }
+        .pm-card {
+            border: 1px solid var(--pm-border);
+            border-radius: 16px;
+            padding: 0;
+            background: #ffffff;
+            box-shadow: var(--pm-shadow-soft);
+            margin-bottom: 14px;
+            overflow: hidden;
+        }
+        .pm-card-top {
+            padding: 16px 18px 14px 18px;
+            border-left: 5px solid var(--pm-accent);
+            background: var(--pm-top);
+        }
+        .pm-card-title {
+            font-size: 18px;
+            line-height: 1.35;
+            font-weight: 800;
+            color: #172033;
+            margin-bottom: 10px;
+        }
+        .pm-chip {
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            border-radius: 999px;
+            padding: 4px 10px;
+            font-size: 12px;
+            color: #172033;
+            background: rgba(255, 255, 255, 0.78);
+        }
+        .pm-card-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+        }
+        .pm-card-body {
+            display: grid;
+            gap: 10px;
+            padding: 14px 16px 16px 16px;
+        }
+        .pm-field {
+            border-radius: 12px;
+            padding: 10px 12px;
+            background: var(--pm-field-bg);
+        }
+        .pm-field-label {
+            font-size: 12px;
+            color: var(--pm-accent);
+            font-weight: 800;
+            margin-bottom: 4px;
+        }
+        .pm-field-value {
+            color: #172033;
+            line-height: 1.65;
+            white-space: pre-wrap;
+        }
+        .pm-small {
+            color: #64748b;
+            font-size: 13px;
+        }
+        .pm-source-anchor {
+            display: block;
+            scroll-margin-top: 16px;
+            height: 1px;
+        }
+        .pm-source-link {
+            display: inline-flex;
+            align-items: center;
+            border: 1px solid #bfdbfe;
+            border-radius: 999px;
+            padding: 3px 10px;
+            background: #eff6ff;
+            color: #1d4ed8;
+            font-size: 13px;
+            text-decoration: none;
+        }
+        iframe.pm-pdf {
+            border: 1px solid #d8dee9;
+            border-radius: 16px;
+            background: #f8fafc;
+        }
+        .pm-auth-shell {
+            max-width: 1080px;
+            margin: 28px auto 0 auto;
+            display: grid;
+            grid-template-columns: 1fr 0.95fr;
+            gap: 22px;
+            align-items: stretch;
+        }
+        .pm-auth-panel,
+        .pm-auth-copy,
+        .pm-library-panel {
+            border: 1px solid var(--pm-border);
+            border-radius: 18px;
+            background: #ffffff;
+            box-shadow: var(--pm-shadow-soft);
+        }
+        .pm-auth-copy {
+            padding: 26px;
+            background:
+                radial-gradient(circle at 15% 20%, rgba(79, 70, 229, 0.13), transparent 26%),
+                linear-gradient(135deg, #ffffff 0%, #f5f3ff 100%);
+            border-color: #ddd6fe;
+        }
+        .pm-auth-copy h2 {
+            font-size: 31px;
+            margin: 0 0 8px 0;
+        }
+        .pm-auth-copy p {
+            color: var(--pm-muted);
+            line-height: 1.72;
+            margin: 0 0 12px 0;
+        }
+        .pm-auth-slogan {
+            font-size: 14px;
+            color: var(--pm-primary);
+            font-weight: 800;
+            margin-bottom: 14px;
+        }
+        .pm-feature-list {
+            display: grid;
+            gap: 10px;
+            margin-top: 18px;
+        }
+        .pm-feature-item {
+            border: 1px solid #e9d5ff;
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.72);
+            padding: 11px 12px;
+        }
+        .pm-feature-item strong {
+            display: block;
+            color: var(--pm-text);
+            margin-bottom: 3px;
+        }
+        .pm-feature-item span {
+            color: var(--pm-muted);
+            font-size: 13px;
+        }
+        .pm-auth-panel {
+            padding: 20px 22px 10px 22px;
+        }
+        .pm-user-pill {
+            border: 1px solid #dbeafe;
+            border-radius: 12px;
+            background: #f8fafc;
+            padding: 9px 10px;
+            color: #1f2937;
+            font-size: 13px;
+            margin: 8px 0 12px 0;
+        }
+        .pm-library-panel {
+            padding: 16px 18px;
+            margin-bottom: 16px;
+        }
+        .pm-library-panel h3 {
+            font-size: 18px;
+            margin: 0 0 8px 0;
+        }
+        .pm-library-panel p {
+            margin: 0;
+            color: var(--pm-muted);
+            line-height: 1.55;
+        }
+        div[data-testid="stDialog"] div[role="dialog"] {
+            border-radius: 18px;
+            border: 1px solid #ddd6fe;
+            box-shadow: 0 22px 70px rgba(15, 23, 42, 0.24);
+        }
+        .pm-welcome {
+            padding: 4px 2px 2px 2px;
+        }
+        .pm-welcome-kicker {
+            display: inline-flex;
+            border-radius: 999px;
+            padding: 4px 10px;
+            background: #eef2ff;
+            color: #4338ca;
+            font-size: 12px;
+            font-weight: 800;
+            margin-bottom: 10px;
+        }
+        .pm-welcome h2 {
+            font-size: 25px;
+            margin: 0 0 8px 0;
+        }
+        .pm-welcome p,
+        .pm-welcome li {
+            color: #475569;
+            line-height: 1.68;
+        }
+        .pm-danger-zone {
+            border: 1px solid #fecaca;
+            background: #fef2f2;
+            border-radius: 16px;
+            padding: 14px;
+            margin-top: 12px;
+        }
+        @media (max-width: 860px) {
+            .pm-auth-shell {
+                grid-template-columns: 1fr;
+                margin-top: 12px;
+            }
+            .pm-grid-metrics,
+            .pm-reference-meta,
+            .pm-card-grid {
+                grid-template-columns: 1fr;
+            }
+            .pm-chat-user,
+            .pm-chat-assistant {
+                margin-left: 0;
+                margin-right: 0;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_app_header(
+    title: str,
+    subtitle: str,
+    status_badges: list[str] | None = None,
+) -> None:
+    """Render a page-level header with optional status badges."""
+    badges = "".join(status_badges or [])
+    st.markdown(
+        f"""
+        <div class="pm-hero">
+          <div class="pm-hero-top">
+            <div>
+              <h1>{html.escape(title)}</h1>
+              <p>{html.escape(subtitle)}</p>
+            </div>
+            <div class="pm-badges">{badges}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric_card(
+    label: str,
+    value: Any,
+    helper: str | None = None,
+    status: str | None = None,
+) -> None:
+    """Render a compact metric card."""
+    status_class = f" pm-metric-card-{html.escape(status)}" if status else ""
+    helper_html = f'<div class="pm-metric-helper">{html.escape(helper)}</div>' if helper else ""
+    st.markdown(
+        f"""
+        <div class="pm-metric-card{status_class}">
+          <div class="pm-metric-label">{html.escape(label)}</div>
+          <div class="pm-metric-value">{html.escape(str(value))}</div>
+          {helper_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_empty_state(
+    title: str,
+    description: str,
+    action_label: str | None = None,
+) -> None:
+    """Render a consistent empty state."""
+    action_html = (
+        f'<div class="pm-empty-action">{html.escape(action_label)}</div>'
+        if action_label
+        else ""
+    )
+    st.markdown(
+        f"""
+        <div class="pm-empty-state">
+          <div class="pm-empty-icon">PM</div>
+          <div class="pm-empty-title">{html.escape(title)}</div>
+          <div class="pm-empty-description">{html.escape(description)}</div>
+          {action_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_error_card(title: str, message: str, detail: str | None = None) -> None:
+    """Render a friendly error card with optional folded technical detail."""
+    st.markdown(
+        f"""
+        <div class="pm-error-card" style="border-color:#fecaca;background:#fffafa;">
+          <div class="pm-section-title" style="color:#b91c1c;">{html.escape(title)}</div>
+          <div class="pm-section-description">{html.escape(message)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if detail:
+        with st.expander("技术详情", expanded=False):
+            st.code(str(detail), language="text")
+
+
+def render_section_card(title: str, description: str | None = None) -> None:
+    """Render a standalone section heading card."""
+    description_html = (
+        f'<p class="pm-section-description">{html.escape(description)}</p>'
+        if description
+        else ""
+    )
+    st.markdown(
+        f"""
+        <div class="pm-section-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">{html.escape(title)}</h3>
+              {description_html}
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_chat_message(role: str, content: str) -> None:
+    """Render a ChatGPT-style message bubble."""
+    normalized_role = "user" if role == "user" else "assistant"
+    role_label = "你" if normalized_role == "user" else "PaperMate"
+    safe_content = html.escape(str(content or "")).replace("\n", "<br>")
+    st.markdown(
+        f"""
+        <div class="pm-chat-message pm-chat-{normalized_role}">
+          <div class="pm-chat-role">{role_label}</div>
+          <div>{safe_content}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def current_user() -> dict[str, Any] | None:
     """Return the authenticated user stored in the Streamlit session."""
     user = st.session_state.get("current_user")
@@ -495,15 +1268,30 @@ def render_welcome_dialog() -> None:
 
 def render_auth_page() -> None:
     """Render login and registration controls."""
-    render_header()
+    render_app_header(
+        "PaperMate",
+        "Upload. Read. Ask. Organize. 本地运行的论文阅读 RAG 助手。",
+        [
+            render_status_badge("PDF 解析", "primary"),
+            render_status_badge("可信引用问答", "info"),
+            render_status_badge("文献卡片管理", "success"),
+        ],
+    )
     st.markdown(
         """
         <div class="pm-auth-shell">
           <div class="pm-auth-copy">
-            <h2>先认个门牌号</h2>
-            <p>登录后，文献卡片会只进你的库。别人看不到你的卡片，你也不会误删别人的整理成果。</p>
-            <p>新用户注册后会自动获得一个“默认卡片库”，之后可以继续创建新的主题库。</p>
+            <div class="pm-auth-slogan">Upload. Read. Ask. Organize.</div>
+            <h2>把论文阅读变成一个可信的工作台</h2>
+            <p>上传 PDF 后，PaperMate 会解析正文、构建向量与关键词索引，并严格基于论文原文片段回答问题。</p>
+            <p>论文文件、索引和文献卡片默认保存在你的本地运行环境中。</p>
+            <div class="pm-feature-list">
+              <div class="pm-feature-item"><strong>PDF 解析</strong><span>MinerU 转 Markdown，保留页码、图片和正文结构。</span></div>
+              <div class="pm-feature-item"><strong>可信引用问答</strong><span>Hybrid Retrieval + RRF，回答下方展示引用来源。</span></div>
+              <div class="pm-feature-item"><strong>文献卡片管理</strong><span>把研究问题、方法和实验信息沉淀成可复用卡片。</span></div>
+            </div>
           </div>
+          <div class="pm-auth-panel">
         """,
         unsafe_allow_html=True,
     )
@@ -519,7 +1307,7 @@ def render_auth_page() -> None:
         if submitted:
             user = authenticate_user(username, password)
             if not user:
-                st.error("用户名或密码不正确。")
+                render_error_card("登录失败", "用户名或密码不正确，请检查后再试。")
                 return
             prepare_user_workspace(int(user["user_id"]))
             set_current_user(user)
@@ -535,13 +1323,13 @@ def render_auth_page() -> None:
 
         if submitted:
             if password != password_confirm:
-                st.error("两次输入的密码不一致。")
+                render_error_card("注册失败", "两次输入的密码不一致。")
                 return
             try:
                 user = create_user(username, password)
                 prepare_user_workspace(int(user["user_id"]))
             except (ValueError, OSError, sqlite3.Error) as exc:
-                st.error(str(exc) or "注册失败，请稍后再试。")
+                render_error_card("注册失败", str(exc) or "注册失败，请稍后再试。")
                 return
             set_current_user(user)
             st.success("注册成功。")
@@ -550,31 +1338,51 @@ def render_auth_page() -> None:
     st.markdown("</div></div>", unsafe_allow_html=True)
 
 
-def render_sidebar_navigation(user: dict[str, Any]) -> str:
-    """Render the sidebar and return the selected page."""
+def render_sidebar(user: dict[str, Any]) -> str:
+    """Render the sidebar and return the selected logical page."""
     st.sidebar.markdown(
         f"""
         <div class="pm-sidebar-brand">
+          <div class="pm-sidebar-logo">PM</div>
           <div class="pm-sidebar-brand-title">PaperMate</div>
-          <div class="pm-sidebar-brand-subtitle">论文阅读、问答、卡片和反馈管理</div>
+          <div class="pm-sidebar-brand-subtitle">Upload. Read. Ask. Organize.</div>
         </div>
         <div class="pm-user-pill">当前用户：{html.escape(str(user["username"]))}</div>
         <div class="pm-sidebar-section">工作区</div>
         """,
         unsafe_allow_html=True,
     )
-    page = st.sidebar.radio(
+    page_labels = {
+        "📄 论文工作台": "论文工作台",
+        "🗂 文献卡片库": "文献卡片库",
+        "🧪 反馈记录": "反馈记录",
+    }
+    selected_label = st.sidebar.radio(
         "页面",
-        ["论文工作台", "文献卡片库", "反馈记录"],
+        list(page_labels.keys()),
         label_visibility="collapsed",
     )
 
-    st.sidebar.caption("PDF 转 Markdown · Hybrid RAG · 文献卡片")
+    st.sidebar.markdown(
+        f"""
+        <div class="pm-sidebar-footer">
+          <div>{render_status_badge("本地运行", "success")} {render_status_badge("数据私有", "primary")}</div>
+          <div style="margin-top:8px;">版本：v{html.escape(__version__)}</div>
+          <div>PDF 转 Markdown · Hybrid RAG · 文献卡片</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     if st.sidebar.button("退出登录", use_container_width=True):
         clear_authenticated_session()
         st.rerun()
 
-    return page
+    return page_labels[selected_label]
+
+
+def render_sidebar_navigation(user: dict[str, Any]) -> str:
+    """Backward-compatible sidebar wrapper."""
+    return render_sidebar(user)
 
 
 def format_file_size(size_bytes: int) -> str:
@@ -935,16 +1743,41 @@ def process_uploaded_pdf(uploaded_file: UploadedFile) -> dict[str, Any]:
     return result
 
 
+def local_index_state(paper_id: str) -> dict[str, str]:
+    """Return UI-only index status without triggering remote embedding calls."""
+    state_key = f"index_state_{paper_id}"
+    state = st.session_state.get(state_key, {})
+    vector_status = str(state.get("vector") or "未知")
+    bm25_status = str(state.get("bm25") or "未知")
+
+    bm25_payload = settings.bm25_dir / f"{paper_id}_payloads.json"
+    bm25_pickle = settings.bm25_dir / f"{paper_id}_bm25.pkl"
+    fallback_payload = Path("data/bm25") / f"{paper_id}_payloads.json"
+    fallback_pickle = Path("data/bm25") / f"{paper_id}_bm25.pkl"
+    if bm25_status == "未知" and (
+        (bm25_payload.exists() and bm25_pickle.exists())
+        or (fallback_payload.exists() and fallback_pickle.exists())
+    ):
+        bm25_status = "已构建"
+
+    return {"vector": vector_status, "bm25": bm25_status}
+
+
+def index_status_type(status: str) -> str:
+    """Map index status text to badge/card status."""
+    if status == "已构建":
+        return "success"
+    if status == "失败":
+        return "error"
+    return "warning"
+
+
 def render_header() -> None:
     """Render the shared page header."""
-    st.markdown(
-        """
-        <div class="pm-hero">
-          <h1>PaperMate</h1>
-          <p>论文阅读 RAG 助手：PDF 转 Markdown、检索问答、反馈记录和文献卡片管理。</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    render_app_header(
+        "PaperMate",
+        "论文阅读 RAG 助手：PDF 转 Markdown、检索问答、反馈记录和文献卡片管理。",
+        [render_status_badge("本地工作台", "primary"), render_status_badge("可信引用", "info")],
     )
 
 
@@ -953,15 +1786,29 @@ def render_processed_pdf_summary(processed_pdf: dict[str, Any]) -> None:
     saved_file = processed_pdf["saved_file"]
     parsed_pdf = processed_pdf["parsed_pdf"]
 
-    st.success("PDF 已保存并完成 Markdown 解析。")
-    col_a, col_b, col_c = st.columns(3)
-    col_a.metric("页数", parsed_pdf["page_count"])
-    col_b.metric("字符数", processed_pdf["total_chars"])
-    col_c.metric("图片数", len(parsed_pdf.get("images", [])))
-
-    st.caption(f"文件名：{saved_file['file_name']}")
-    st.caption(f"paper_id：{saved_file['paper_id']}")
-    st.caption(f"PDF 路径：{saved_file['save_path']}")
+    st.markdown(
+        f"""
+        <div class="pm-upload-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">论文已解析</h3>
+              <p class="pm-section-description">
+                {html.escape(saved_file['file_name'])} 已保存并转换为 Markdown，可继续构建索引或开始阅读。
+              </p>
+            </div>
+            <div class="pm-badges">{render_status_badge("解析完成", "success")}</div>
+          </div>
+          <div class="pm-toolbar">
+            {render_status_badge(f"页数 {parsed_pdf['page_count']}", "info")}
+            {render_status_badge(f"字符数 {processed_pdf['total_chars']}", "default")}
+            {render_status_badge(f"图片 {len(parsed_pdf.get('images', []))} 张", "primary")}
+          </div>
+          <div class="pm-small">paper_id：{html.escape(saved_file['paper_id'])}</div>
+          <div class="pm-small">PDF 路径：{html.escape(saved_file['save_path'])}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     if parsed_pdf.get("markdown_path"):
         markdown_path = Path(parsed_pdf["markdown_path"])
         st.caption(f"Markdown 路径：{markdown_path}")
@@ -988,13 +1835,32 @@ def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
         processed_pdf.get("chunks", []),
     )
 
-    st.markdown("#### 论文正文")
+    st.markdown(
+        f"""
+        <div class="pm-reader-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">论文正文</h3>
+              <p class="pm-section-description">舒适阅读 Markdown 正文，引用片段可从回答区跳回原文。</p>
+            </div>
+          </div>
+          <div class="pm-toolbar">
+            {render_status_badge(f"解析方式 {parsed_pdf.get('parser', '未知')}", "primary")}
+            {render_status_badge(f"页数 {parsed_pdf.get('page_count', 0)}", "info")}
+            {render_status_badge(f"图片 {len(parsed_pdf.get('images', []))} 张", "default")}
+            {render_status_badge(f"Chunks {len(processed_pdf.get('chunks', []))}", "success")}
+          </div>
+          <div class="pm-reader-shell">
+        """,
+        unsafe_allow_html=True,
+    )
     if paper_header:
         st.markdown("##### 开头信息")
         st.write("标题：", paper_header.get("title") or "未识别")
         st.write("作者：", paper_header.get("authors") or "未识别")
 
     st.markdown(anchored_body or "暂无 Markdown 内容", unsafe_allow_html=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 def render_extracted_images(images: list[dict[str, str]]) -> None:
     """Render extracted paper image downloads and optional inspection."""
@@ -1038,9 +1904,22 @@ def render_literature_card_save(
     user_id: int,
 ) -> None:
     """Render literature card generation and persistence button."""
-    st.markdown("#### 文献卡片")
+    st.markdown(
+        f"""
+        <div class="pm-section-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">生成文献卡片</h3>
+              <p class="pm-section-description">从当前论文中提取研究问题、方法、贡献、实验、局限性和个人复习线索。</p>
+            </div>
+            <div class="pm-badges">{render_status_badge("Markdown 卡片", "primary")}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     if not chunks:
-        st.warning("论文正文为空，暂时无法生成文献卡片。")
+        render_empty_state("暂时无法生成卡片", "论文正文为空，暂时无法生成文献卡片。")
         return
     if db_save_failed:
         st.warning("数据库保存失败，文献卡片可能无法基于完整 chunks 生成。")
@@ -1048,11 +1927,11 @@ def render_literature_card_save(
     try:
         libraries = list_card_libraries(user_id)
     except (OSError, sqlite3.Error):
-        st.error("卡片库读取失败，请检查 SQLite 数据库权限。")
+        render_error_card("卡片库读取失败", "请检查 SQLite 数据库权限。")
         return
 
     if not libraries:
-        st.warning("当前用户还没有可用卡片库。")
+        render_empty_state("没有可用卡片库", "当前用户还没有可用卡片库，请先创建一个卡片库。")
         return
 
     selected_library_id = st.selectbox(
@@ -1074,34 +1953,50 @@ def render_literature_card_save(
             try:
                 create_card_library(user_id, new_library_name)
             except sqlite3.IntegrityError:
-                st.error("这个卡片库名字已经存在。")
+                render_error_card("创建失败", "这个卡片库名字已经存在。")
             except (ValueError, OSError, sqlite3.Error) as exc:
-                st.error(str(exc) or "卡片库创建失败。")
+                render_error_card("创建失败", str(exc) or "卡片库创建失败。")
             else:
                 st.success("卡片库已创建。")
                 st.rerun()
 
-    if st.button("生成并保存为新文献卡片", type="primary", use_container_width=True, key=f"save_card_{paper_id}"):
+    generated_key = f"generated_card_markdown_{paper_id}"
+    if st.button("生成文献卡片", type="primary", use_container_width=True, key=f"generate_card_{paper_id}"):
         try:
-            with st.spinner("正在生成文献卡片并保存..."):
-                markdown = generate_literature_card(paper_id)
+            with st.spinner("正在生成文献卡片..."):
+                st.session_state[generated_key] = generate_literature_card(paper_id)
+        except LLMError as exc:
+            render_error_card("文献卡片生成失败", exc.message, f"错误码：{exc.code.value}")
+            return
+
+    generated_markdown = st.session_state.get(generated_key)
+    if generated_markdown:
+        with st.expander("生成结果预览", expanded=True):
+            st.markdown(generated_markdown)
+            st.text_area(
+                "Markdown 原文",
+                value=generated_markdown,
+                height=260,
+                key=f"generated_card_preview_{paper_id}",
+            )
+
+        if st.button("保存到所选卡片库", type="primary", use_container_width=True, key=f"save_card_{paper_id}"):
+            try:
                 card_id = save_literature_card(
                     paper_id,
-                    markdown,
+                    str(st.session_state.get(f"generated_card_preview_{paper_id}") or generated_markdown),
                     user_id=user_id,
                     library_id=int(selected_library_id),
                 )
-        except (LLMError, ValueError, OSError, sqlite3.Error) as exc:
-            if isinstance(exc, LLMError):
-                st.error(f"{exc.message}（错误码：{exc.code.value}）")
-            else:
-                st.error(str(exc) or "文献卡片保存失败，请检查 SQLite 数据库权限。")
-            return
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                render_error_card("文献卡片保存失败", str(exc) or "请检查 SQLite 数据库权限。")
+                return
 
-        st.session_state[f"saved_card_id_{paper_id}"] = card_id
-        library = get_card_library(int(selected_library_id), user_id)
-        library_name = library["name"] if library else "所选卡片库"
-        st.success(f"新文献卡片已保存到「{library_name}」，可在“文献卡片库”页面查看、批量管理和编辑。")
+            st.session_state[f"saved_card_id_{paper_id}"] = card_id
+            library = get_card_library(int(selected_library_id), user_id)
+            library_name = library["name"] if library else "所选卡片库"
+            st.toast("文献卡片已保存。")
+            st.success(f"新文献卡片已保存到「{library_name}」，可在“文献卡片库”页面查看、批量管理和编辑。")
 
     saved_card = get_literature_card_by_paper(paper_id, user_id=user_id)
     if saved_card:
@@ -1132,13 +2027,31 @@ def render_chunk_preview(chunks: list[dict[str, Any]]) -> None:
 
 def render_index_builder(chunks: list[dict[str, Any]]) -> None:
     """Render the hybrid index build action."""
-    st.markdown("#### 构建论文索引")
     if not chunks:
-        st.info("没有可入库的 chunk。")
+        render_empty_state("还没有可检索内容", "论文正文为空，当前没有可入库的 chunk。")
         return
 
+    paper_id = str(chunks[0].get("paper_id") or "")
+    index_state = local_index_state(paper_id)
+    st.markdown(
+        f"""
+        <div class="pm-section-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">构建论文索引</h3>
+              <p class="pm-section-description">同时构建 Chroma 向量索引和 BM25 关键词索引，问答时会自动融合排序。</p>
+            </div>
+            <div class="pm-badges">
+              {render_status_badge(f"向量 {index_state['vector']}", index_status_type(index_state['vector']))}
+              {render_status_badge(f"BM25 {index_state['bm25']}", index_status_type(index_state['bm25']))}
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if st.button("构建论文索引", type="primary", use_container_width=True, key="build_paper_index"):
-        paper_id = str(chunks[0].get("paper_id") or "")
         vector_count: int | None = None
         bm25_result: dict[str, Any] | None = None
         vector_error: Exception | None = None
@@ -1159,6 +2072,10 @@ def render_index_builder(chunks: list[dict[str, Any]]) -> None:
                 bm25_error = exc
                 logger.exception("BM25 index build failed. paper_id=%s", paper_id)
 
+        st.session_state[f"index_state_{paper_id}"] = {
+            "vector": "已构建" if vector_error is None else "失败",
+            "bm25": "已构建" if bm25_error is None else "失败",
+        }
         if vector_error is None and bm25_error is None:
             st.success("论文索引构建完成，可开始问答。")
             st.caption(
@@ -1174,44 +2091,59 @@ def render_index_builder(chunks: list[dict[str, Any]]) -> None:
             st.warning("关键词索引已构建成功，但向量索引构建失败，当前只能使用关键词检索。")
             return
 
-        st.error("索引构建失败，请检查 API Key、网络连接和本地写入权限后重试。")
+        render_error_card(
+            "索引构建失败",
+            "请检查 API Key、网络连接和本地写入权限后重试。",
+            f"vector_error={vector_error}; bm25_error={bm25_error}",
+        )
+
+
+def render_reference_card(ref: dict[str, Any], index: int) -> None:
+    """Render one trusted citation card."""
+    citation_id = ref.get("citation_id") or index
+    page_label = format_page_label(ref.get("page_num"))
+    section_title = ref.get("section_title") or "未知章节"
+    source_ranks = ref.get("source_ranks") or {}
+    vector_rank = source_ranks.get("vector") or ref.get("vector_rank") or ""
+    bm25_rank = source_ranks.get("bm25") or ref.get("bm25_rank") or ""
+    rrf_score = format_optional_float(ref.get("rrf_score"))
+    preview = ref.get("text_preview") or ref.get("text") or ""
+    relevance = "高相关" if ref.get("rrf_score") else "引用依据"
+    st.markdown(
+        f"""
+        <div class="pm-reference-card">
+          <div class="pm-reference-head">
+            <div class="pm-reference-title">引用 [{html.escape(str(citation_id))}] · {html.escape(page_label)} · {html.escape(str(section_title))}</div>
+            <div class="pm-badges">{render_status_badge(relevance, "success")}</div>
+          </div>
+          <div class="pm-reference-text">{html.escape(str(preview))}</div>
+          <div class="pm-reference-meta">
+            <div class="pm-reference-meta-item">RRF 分数<strong>{html.escape(rrf_score or "无")}</strong></div>
+            <div class="pm-reference-meta-item">Vector Rank<strong>{html.escape(str(vector_rank or "无"))}</strong></div>
+            <div class="pm-reference-meta-item">BM25 Rank<strong>{html.escape(str(bm25_rank or "无"))}</strong></div>
+            <div class="pm-reference-meta-item">Chunk ID<strong>{html.escape(str(ref.get("chunk_id", "")))}</strong></div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(source_anchor_link(ref.get("chunk_id")), unsafe_allow_html=True)
 
 
 def render_citations(citations: list[dict[str, Any]]) -> None:
     """Render citations produced from chunk metadata."""
-    st.markdown("#### 引用来源")
+    st.markdown("#### 可信引用")
     if not citations:
-        st.write("无引用来源。")
+        render_empty_state("暂无可信引用", "当前回答没有可展示的引用来源。")
         return
 
-    for index, citation in enumerate(citations, start=1):
-        citation_id = citation.get("citation_id") or index
-        page_label = format_page_label(citation.get("page_num"))
-        section_title = citation.get("section_title") or "未知章节"
-        title = f"引用片段 {citation_id}｜{page_label}｜{section_title}"
-        source_ranks = citation.get("source_ranks") or {}
+    for index, citation in enumerate(citations[:3], start=1):
+        render_reference_card(citation, index)
 
-        with st.expander(title, expanded=index == 1):
-            st.write("chunk_id：", citation.get("chunk_id", ""))
-            st.markdown(source_anchor_link(citation.get("chunk_id")), unsafe_allow_html=True)
-            st.write("检索来源：", format_retrieval_sources(citation.get("retrieval_sources")))
-            st.write("source_ranks：", source_ranks or "无")
-
-            vector_rank = source_ranks.get("vector")
-            bm25_rank = source_ranks.get("bm25")
-            if vector_rank:
-                st.write("向量排名：", vector_rank)
-            if bm25_rank:
-                st.write("BM25 排名：", bm25_rank)
-
-            rrf_score = citation.get("rrf_score")
-            if rrf_score is not None:
-                st.write("RRF 分数：", format_optional_float(rrf_score))
-
-            preview = citation.get("text_preview") or ""
-            if preview:
-                st.markdown("**原文预览**")
-                st.write(preview)
+    if len(citations) > 3:
+        with st.expander(f"查看其余 {len(citations) - 3} 条可信引用", expanded=False):
+            for index, citation in enumerate(citations[3:], start=4):
+                render_reference_card(citation, index)
 
 
 def render_source_chunks(source_chunks: list[dict[str, Any]]) -> None:
@@ -1336,15 +2268,59 @@ def strategy_message(strategy: str) -> str:
 
 def render_qa_box(paper_id: str) -> None:
     """Render RAG question-answering controls."""
-    st.markdown("#### 论文问答")
-    question = st.text_area(
-        "输入你的问题",
-        placeholder="例如：这篇论文的核心方法是什么？",
-        key=f"question_{paper_id}",
-        height=96,
+    index_state = local_index_state(paper_id)
+    st.markdown(
+        f"""
+        <div class="pm-ask-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">Ask PaperMate</h3>
+              <p class="pm-section-description">只基于论文原文和引用片段回答，适合追问方法、实验、贡献和局限。</p>
+            </div>
+            <div class="pm-badges">
+              {render_status_badge(f"向量 {index_state['vector']}", index_status_type(index_state['vector']))}
+              {render_status_badge(f"BM25 {index_state['bm25']}", index_status_type(index_state['bm25']))}
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    if st.button("提问", key=f"ask_{paper_id}", type="primary", use_container_width=True):
+    quick_questions = [
+        "这篇论文解决了什么问题？",
+        "核心方法是什么？",
+        "实验结果说明了什么？",
+        "有哪些局限性？",
+        "帮我总结创新点",
+    ]
+    quick_cols = st.columns([1, 1, 1])
+    for index, quick_question in enumerate(quick_questions):
+        with quick_cols[index % 3]:
+            if st.button(
+                quick_question,
+                key=f"quick_question_{paper_id}_{index}",
+                use_container_width=True,
+            ):
+                st.session_state[f"question_{paper_id}"] = quick_question
+
+    if index_state["vector"] != "已构建" and index_state["bm25"] != "已构建":
+        render_empty_state(
+            "还没有可检索索引",
+            "请先构建索引，然后再开始基于论文原文问答。",
+            "点击上方“构建论文索引”",
+        )
+
+    with st.form(key=f"ask_form_{paper_id}"):
+        question = st.text_area(
+            "输入你的问题",
+            placeholder="例如：这篇论文的核心方法是什么？",
+            key=f"question_{paper_id}",
+            height=96,
+        )
+        submitted = st.form_submit_button("基于论文原文提问", type="primary", use_container_width=True)
+
+    if submitted:
         if not question.strip():
             st.warning("请输入问题。")
             return
@@ -1355,13 +2331,13 @@ def render_qa_box(paper_id: str) -> None:
         except AppError as exc:
             logger.exception("RAG question answering failed. paper_id=%s", paper_id)
             if exc.code in {ErrorCode.VECTOR_SEARCH_FAILED, ErrorCode.BM25_INDEX_MISSING}:
-                st.error("请先构建论文索引后再提问。")
+                render_error_card("还没有可检索索引", "请先构建论文索引后再提问。", exc.detail)
             else:
-                st.error("问答失败，请查看日志或检查模型与索引配置。")
+                render_error_card("问答失败", "请查看日志或检查模型与索引配置。", exc.detail)
             return
         except Exception:
             logger.exception("Unexpected RAG question answering failure. paper_id=%s", paper_id)
-            st.error("问答失败，请查看日志或检查模型与索引配置。")
+            render_error_card("问答失败", "请查看日志或检查模型与索引配置。")
             return
 
         qa_log_id = rag_result.get("qa_id")
@@ -1386,8 +2362,8 @@ def render_qa_box(paper_id: str) -> None:
 
     qa_record = st.session_state.get(f"last_qa_{paper_id}")
     if qa_record:
-        st.markdown("#### 回答")
-        st.write(qa_record["answer"])
+        render_chat_message("user", qa_record["question"])
+        render_chat_message("assistant", qa_record["answer"])
         if needs_index_warning(qa_record.get("retrieval_details", {})):
             st.warning("请先构建论文索引后再提问。")
         render_citations(qa_record["citations"])
@@ -1428,7 +2404,7 @@ def render_feedback_form(qa_record: dict[str, Any]) -> None:
             key=f"feedback_comment_{record_key}",
             height=90,
         )
-        submitted = st.form_submit_button("提交反馈")
+        submitted = st.form_submit_button("提交回答反馈")
 
     if submitted:
         try:
@@ -1452,11 +2428,64 @@ def render_feedback_form(qa_record: dict[str, Any]) -> None:
 
 def render_workspace_page() -> None:
     """Render the two-column paper workspace page."""
-    render_header()
-
     processed_pdf: dict[str, Any] | None = st.session_state.get("processed_pdf")
+    paper_id = ""
+    if processed_pdf:
+        paper_id = str(processed_pdf.get("saved_file", {}).get("paper_id") or "")
+    index_state = local_index_state(paper_id) if paper_id else {"vector": "未知", "bm25": "未知"}
 
-    st.subheader("上传 PDF")
+    render_app_header(
+        "论文工作台",
+        "上传 PDF，解析正文，构建 Hybrid RAG 索引，并基于可信引用追问论文。",
+        [
+            render_status_badge("本地运行", "success"),
+            render_status_badge("MinerU / PyMuPDF", "primary"),
+            render_status_badge("Hybrid RAG", "info"),
+        ],
+    )
+
+    metric_cols = st.columns(5)
+    saved_file = processed_pdf.get("saved_file", {}) if processed_pdf else {}
+    chunks = processed_pdf.get("chunks", []) if processed_pdf else []
+    with metric_cols[0]:
+        render_metric_card("当前论文", saved_file.get("file_name") or "未上传", "上传 PDF 后开始解析")
+    with metric_cols[1]:
+        render_metric_card(
+            "解析状态",
+            "已完成" if processed_pdf else "未开始",
+            "Markdown 与图片抽取",
+            "success" if processed_pdf else "warning",
+        )
+    with metric_cols[2]:
+        render_metric_card("Chunk 数量", len(chunks), "用于检索的论文片段")
+    with metric_cols[3]:
+        render_metric_card(
+            "向量索引",
+            index_state["vector"],
+            "Chroma 语义检索",
+            index_status_type(index_state["vector"]),
+        )
+    with metric_cols[4]:
+        render_metric_card(
+            "BM25 状态",
+            index_state["bm25"],
+            "关键词精确检索",
+            index_status_type(index_state["bm25"]),
+        )
+
+    st.markdown(
+        """
+        <div class="pm-upload-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">上传与解析</h3>
+              <p class="pm-section-description">拖拽或选择一篇 PDF。解析可能需要数十秒到数分钟，完成后可下载 Markdown 和图片。</p>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     uploaded_file = st.file_uploader(
         "选择一篇 PDF 论文",
         type=["pdf"],
@@ -1470,7 +2499,11 @@ def render_workspace_page() -> None:
             if saved_file.get("file_name"):
                 st.caption(f"当前论文：{saved_file['file_name']}")
         else:
-            st.info("上传 PDF 后，点击开始解析；解析完成后页面会显示完整 Markdown，右侧可以进行论文问答。")
+            render_empty_state(
+                "还没有论文",
+                "上传一篇 PDF，PaperMate 会帮你解析正文、构建索引并开始问答。",
+                "选择 PDF 文件",
+            )
             return
     else:
         signature = get_uploaded_file_signature(uploaded_file)
@@ -1479,6 +2512,9 @@ def render_workspace_page() -> None:
 
         if cached_pdf:
             processed_pdf = cached_pdf
+            if st.button("重新解析当前 PDF", use_container_width=True):
+                st.session_state.pop("processed_pdf", None)
+                st.rerun()
         else:
             processed_pdf = None
             st.info("PDF 已上传到页面，点击下方按钮后开始解析。MinerU 解析可能需要数十秒到数分钟。")
@@ -1488,14 +2524,18 @@ def render_workspace_page() -> None:
                         processed_pdf = process_uploaded_pdf(uploaded_file)
                 except (UploadError, PdfParseError, MinerUError) as exc:
                     logger.exception("PDF upload or parse failed.")
-                    st.error(f"{exc.message}（错误码：{exc.code.value}）")
+                    render_error_card(
+                        "PDF 解析失败",
+                        f"{exc.message} 请检查文件、解析服务配置或网络连接后重试。",
+                        f"错误码：{exc.code.value}",
+                    )
                     processed_pdf = None
 
     if not processed_pdf:
         return
 
     if processed_pdf["db_save_failed"]:
-        st.warning("数据保存失败，但不影响当前解析结果，请检查 SQLite 数据库权限。")
+        render_error_card("数据保存失败", "解析结果可以继续查看，但 RAG 和文献卡片可能无法使用。请检查 SQLite 数据库权限。")
 
     render_processed_pdf_summary(processed_pdf)
     render_index_builder(processed_pdf["chunks"])
@@ -1529,7 +2569,7 @@ def card_palette(card: dict[str, Any]) -> dict[str, str]:
     return CARD_PALETTES[card_id % len(CARD_PALETTES)]
 
 
-def render_card_visual(card: dict[str, Any]) -> None:
+def render_literature_card(card: dict[str, Any]) -> None:
     """Render one saved literature card as a compact visual card."""
     title = escaped_text(card.get("title"))
     authors = escaped_text(card.get("authors"))
@@ -1574,6 +2614,11 @@ def render_card_visual(card: dict[str, Any]) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_card_visual(card: dict[str, Any]) -> None:
+    """Backward-compatible wrapper for the literature card UI."""
+    render_literature_card(card)
 
 
 def render_pdf_viewer(save_path: str | None) -> None:
@@ -1702,13 +2747,16 @@ def render_library_rename_form(user_id: int, library: dict[str, Any]) -> None:
 
 def render_card_library_page(user_id: int) -> None:
     """Render saved literature-card management page."""
-    render_header()
-    st.subheader("文献卡片库")
+    render_app_header(
+        "文献卡片库",
+        "管理你的论文阅读记录、方法总结和研究灵感。",
+        [render_status_badge("个人知识库", "primary"), render_status_badge("本地保存", "success")],
+    )
 
     try:
         libraries = list_card_libraries(user_id)
     except (OSError, sqlite3.Error):
-        st.error("卡片库读取失败，请检查 SQLite 数据库权限。")
+        render_error_card("卡片库读取失败", "请检查 SQLite 数据库权限后重试。")
         return
 
     library_count = len(libraries)
@@ -1738,6 +2786,22 @@ def render_card_library_page(user_id: int) -> None:
         else None
     )
 
+    all_cards = list_literature_cards(user_id=user_id)
+    cards = list_literature_cards(user_id=user_id, library_id=library_filter)
+    scope_name = selected_library["name"] if selected_library else "全部卡片库"
+    related_pdf_count = len({card.get("paper_id") for card in all_cards if card.get("paper_id")})
+    latest_update = max((str(card.get("updated_at") or "") for card in all_cards), default="暂无")
+
+    metric_cols = st.columns(4)
+    with metric_cols[0]:
+        render_metric_card("卡片总数", len(all_cards), f"{library_count} 个卡片库")
+    with metric_cols[1]:
+        render_metric_card("当前库卡片数", len(cards), scope_name)
+    with metric_cols[2]:
+        render_metric_card("最近更新", latest_update or "暂无", "按更新时间倒序")
+    with metric_cols[3]:
+        render_metric_card("关联 PDF 数量", related_pdf_count, "按 paper_id 统计")
+
     tools_col, rename_col = st.columns([0.48, 0.52], gap="large")
     with tools_col:
         with st.expander("创建新卡片库", expanded=False):
@@ -1749,12 +2813,46 @@ def render_card_library_page(user_id: int) -> None:
         else:
             st.caption("选择某个具体卡片库后，可以在这里修改它的名字。")
 
-    cards = list_literature_cards(user_id=user_id, library_id=library_filter)
+    search_col, sort_col = st.columns([0.7, 0.3], gap="large")
+    with search_col:
+        search_query = st.text_input("搜索文献卡片", placeholder="输入标题、作者、研究问题、方法关键词")
+    with sort_col:
+        sort_mode = st.selectbox("排序", ["最近更新优先", "标题 A-Z", "年份新到旧"])
+
+    if search_query.strip():
+        needle = search_query.strip().lower()
+        cards = [
+            card
+            for card in cards
+            if needle
+            in " ".join(
+                str(card.get(key) or "")
+                for key in (
+                    "title",
+                    "authors",
+                    "year",
+                    "research_field",
+                    "research_question",
+                    "method_summary",
+                    "datasets",
+                    "library_name",
+                    "file_name",
+                )
+            ).lower()
+        ]
+    if sort_mode == "标题 A-Z":
+        cards = sorted(cards, key=lambda card: str(card.get("title") or ""))
+    elif sort_mode == "年份新到旧":
+        cards = sorted(cards, key=lambda card: str(card.get("year") or ""), reverse=True)
+
     if not cards:
-        st.info("这个范围里还没有文献卡片。去“论文工作台”上传 PDF，生成卡片时选一个目标库即可。")
+        render_empty_state(
+            "还没有文献卡片",
+            "在论文工作台中生成第一张文献卡片，建立你的研究知识库。",
+            "去论文工作台生成卡片",
+        )
         return
 
-    scope_name = selected_library["name"] if selected_library else "全部卡片库"
     st.caption(f"「{scope_name}」共 {len(cards)} 张文献卡片。支持多选批量删除，也可以选择单张卡片查看、修改和打开对应 PDF。")
 
     with st.expander("批量管理", expanded=False):
@@ -1840,44 +2938,108 @@ def require_feedback_admin_password() -> bool:
     """Require an administrator password before showing feedback records."""
     admin_password = feedback_admin_password()
     if not admin_password:
-        st.error("反馈记录页需要管理员密码，请配置 PAPERMATE_ADMIN_PASSWORD 或 PAPERMATE_APP_PASSWORD。")
+        render_error_card(
+            "缺少管理员密码",
+            "反馈记录页需要管理员密码，请配置 PAPERMATE_ADMIN_PASSWORD 或 PAPERMATE_APP_PASSWORD。",
+        )
         return False
 
     if st.session_state.get("feedback_admin_authenticated"):
         return True
 
-    st.subheader("管理员验证")
+    render_section_card("管理员验证", "输入管理员密码后查看用户反馈、Bad Case 和原始记录。")
     password = st.text_input("管理员密码", type="password", key="feedback_admin_password")
-    if st.button("查看反馈记录", type="primary", use_container_width=True):
+    if st.button("查看反馈记录 Dashboard", type="primary", use_container_width=True):
         if hmac.compare_digest(password, admin_password):
             st.session_state["feedback_admin_authenticated"] = True
             st.rerun()
         else:
-            st.error("管理员密码不正确。")
+            render_error_card("验证失败", "管理员密码不正确。")
 
     return False
 
 
 def render_feedback_records_page() -> None:
     """Render saved user feedback and bad cases."""
-    render_header()
-    st.subheader("反馈记录")
+    render_app_header(
+        "反馈记录",
+        "集中查看用户反馈、负面样本和 Bad Case，用于持续优化检索与回答质量。",
+        [render_status_badge("管理员", "warning"), render_status_badge("默认隐藏技术细节", "primary")],
+    )
     if not require_feedback_admin_password():
         return
 
     feedback_rows = list_feedback_records()
     bad_case_rows = list_bad_cases()
 
-    col_a, col_b, col_c = st.columns(3)
-    col_a.metric("反馈总数", len(feedback_rows))
-    col_b.metric("负面反馈", sum(1 for row in feedback_rows if int(row.get("is_negative") or 0)))
-    col_c.metric("Bad Case", len(bad_case_rows))
+    negative_count = sum(1 for row in feedback_rows if int(row.get("is_negative") or 0))
+    unsupported_count = sum(1 for row in feedback_rows if row.get("feedback_type") == "引用不支持答案")
+    hallucination_count = sum(1 for row in feedback_rows if row.get("feedback_type") == "模型编造")
 
-    tab_feedback, tab_bad_cases = st.tabs(["用户反馈", "Bad Case"])
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        render_metric_card("总反馈数", len(feedback_rows), "所有用户反馈")
+    with metric_cols[1]:
+        render_metric_card("负面反馈数", negative_count, "需要优先排查", "error" if negative_count else "success")
+    with metric_cols[2]:
+        render_metric_card("Bad Case 数", len(bad_case_rows), "自动归档负面反馈", "warning" if bad_case_rows else "success")
+    with metric_cols[3]:
+        render_metric_card("引用不支持答案", unsupported_count, "引用质量风险", "error" if unsupported_count else "success")
+    with metric_cols[4]:
+        render_metric_card("模型编造", hallucination_count, "事实性风险", "error" if hallucination_count else "success")
 
-    with tab_feedback:
+    tab_overview, tab_bad_cases, tab_raw = st.tabs(["反馈总览", "Bad Case", "原始记录"])
+
+    with tab_overview:
         if not feedback_rows:
-            st.info("暂无用户反馈。")
+            render_empty_state("没有反馈记录", "暂无反馈。用户提交反馈后，会在这里汇总展示。")
+        else:
+            overview_rows = [
+                {
+                    "反馈 ID": row.get("feedback_id"),
+                    "论文": row.get("file_name") or row.get("paper_id") or "未关联",
+                    "问题": row.get("question") or "",
+                    "回答摘要": str(row.get("answer") or "")[:160],
+                    "反馈类型": row.get("feedback_type") or "",
+                    "是否 Bad Case": "是" if int(row.get("is_negative") or 0) else "否",
+                    "提交时间": row.get("created_at"),
+                }
+                for row in feedback_rows
+            ]
+            st.dataframe(
+                overview_rows,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            for row in feedback_rows:
+                title = f"#{row['feedback_id']} · {row.get('feedback_type') or ''} · {row.get('file_name') or row.get('paper_id') or '未关联论文'}"
+                with st.expander(title):
+                    badge_type = "error" if int(row.get("is_negative") or 0) else "success"
+                    st.markdown(render_status_badge(row.get("feedback_type") or "未标注", badge_type), unsafe_allow_html=True)
+                    st.write("问题：", row.get("question") or "无")
+                    st.write("回答：", row.get("answer") or "无")
+                    st.write("补充说明：", row.get("comment") or "无")
+                    st.caption(f"提交时间：{row.get('created_at')}")
+
+    with tab_bad_cases:
+        if not bad_case_rows:
+            render_empty_state("没有 Bad Case", "暂无 Bad Case。负面反馈会自动在这里归档。")
+        else:
+            for row in bad_case_rows:
+                title = f"#{row['bad_case_id']} · {row.get('error_type') or ''} · {row.get('status') or ''}"
+                with st.expander(title):
+                    st.markdown(render_status_badge(row.get("error_type") or "负面反馈", "error"), unsafe_allow_html=True)
+                    st.write("问题：", row.get("question") or "无")
+                    st.write("回答：", row.get("answer") or "无")
+                    st.write("反馈原因：", row.get("reason") or "无")
+                    st.write("解决方案：", row.get("solution") or "无")
+                    st.write("备注：", row.get("notes") or "无")
+                    st.caption(f"论文：{row.get('file_name') or row.get('paper_id') or '未关联'}")
+
+    with tab_raw:
+        if not feedback_rows:
+            render_empty_state("没有原始记录", "暂无反馈。用户提交反馈后，会在这里汇总展示。")
         else:
             st.dataframe(
                 feedback_rows,
@@ -1897,9 +3059,2286 @@ def render_feedback_records_page() -> None:
                 },
             )
 
+
+def _pm_text(value: Any, default: str = "未提供") -> str:
+    """Return display-safe text for UI cards."""
+    text = str(value or "").strip()
+    return text or default
+
+
+def _pm_compact(value: Any, limit: int = 180, default: str = "原文未明确说明") -> str:
+    """Compact long card text without changing the stored value."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return default
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1].rstrip()}…"
+
+
+def _pm_method_chips(card: dict[str, Any], limit: int = 4) -> list[str]:
+    """Derive lightweight method chips from structured card fields."""
+    source = " ".join(
+        str(card.get(key) or "")
+        for key in ("research_field", "method_summary", "datasets")
+    )
+    parts = [
+        item.strip(" #，,；;、/|()[]{}")
+        for item in re.split(r"[,，;；、/|]\s*|\s{2,}", source)
+    ]
+    chips: list[str] = []
+    for part in parts:
+        if not part or len(part) > 26:
+            continue
+        if part not in chips:
+            chips.append(part)
+        if len(chips) >= limit:
+            break
+    return chips or ["方法待补充"]
+
+
+def _pm_markdown_section(markdown: str, labels: tuple[str, ...], default: str = "原文未明确说明") -> str:
+    """Read optional generated-card sections without changing persistence format."""
+    for label in labels:
+        pattern = rf"^##\s+{re.escape(label)}\s*\n(?P<value>.*?)(?=^##\s+|\Z)"
+        match = re.search(pattern, markdown or "", flags=re.MULTILINE | re.DOTALL)
+        if match and match.group("value").strip():
+            return match.group("value").strip()
+    return default
+
+
+def _pm_recent_week_count(cards: list[dict[str, Any]]) -> int:
+    """Count cards updated in the last seven days when timestamps are parseable."""
+    from datetime import datetime, timedelta
+
+    threshold = datetime.now() - timedelta(days=7)
+    count = 0
+    for card in cards:
+        raw_time = str(card.get("updated_at") or card.get("created_at") or "").strip()
+        if not raw_time:
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw_time.replace("Z", "+00:00").split("+")[0])
+        except ValueError:
+            continue
+        if parsed >= threshold:
+            count += 1
+    return count
+
+
+def render_status_badge(text: str, type: str = "default") -> str:
+    """Return reusable status-badge HTML."""
+    normalized = str(type or "default").strip().lower()
+    if normalized == "error":
+        normalized = "danger"
+    safe_type = html.escape(normalized)
+    return f'<span class="pm-badge pm-badge-{safe_type}">{html.escape(str(text))}</span>'
+
+
+def inject_global_css() -> None:
+    """Inject the PaperMate V2 research-workspace visual system."""
+    st.markdown(
+        """
+        <style>
+        :root {
+          --pm-bg: #F8FAFC;
+          --pm-bg-soft: #F1F5F9;
+          --pm-surface: rgba(255, 255, 255, 0.86);
+          --pm-surface-strong: rgba(255, 255, 255, 0.94);
+          --pm-surface-solid: #FFFFFF;
+          --pm-border: rgba(148, 163, 184, 0.22);
+          --pm-border-strong: rgba(100, 116, 139, 0.28);
+          --pm-text: #0F172A;
+          --pm-text-muted: #64748B;
+          --pm-text-subtle: #94A3B8;
+          --pm-primary: #4F46E5;
+          --pm-primary-2: #2563EB;
+          --pm-violet: #7C3AED;
+          --pm-cyan: #0891B2;
+          --pm-success: #16A34A;
+          --pm-warning: #D97706;
+          --pm-danger: #DC2626;
+          --pm-radius-sm: 10px;
+          --pm-radius-md: 16px;
+          --pm-radius-lg: 22px;
+          --pm-radius-xl: 28px;
+          --pm-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
+          --pm-shadow-md: 0 12px 32px rgba(15, 23, 42, 0.08);
+          --pm-shadow-lg: 0 24px 60px rgba(15, 23, 42, 0.12);
+        }
+
+        html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+          color: var(--pm-text) !important;
+          background:
+            radial-gradient(circle at 8% 4%, rgba(79, 70, 229, 0.14), transparent 30%),
+            radial-gradient(circle at 82% 7%, rgba(8, 145, 178, 0.13), transparent 30%),
+            radial-gradient(circle at 52% 98%, rgba(124, 58, 237, 0.08), transparent 34%),
+            linear-gradient(135deg, #F8FAFC 0%, #F5F3FF 48%, #ECFEFF 100%) !important;
+        }
+        [data-testid="stDecoration"] { display: none; }
+        [data-testid="stToolbar"],
+        [data-testid="collapsedControl"],
+        [data-testid="stSidebarCollapsedControl"] {
+          visibility: visible !important;
+          opacity: 1 !important;
+          pointer-events: auto !important;
+          z-index: 1000000 !important;
+        }
+        [data-testid="collapsedControl"] button,
+        [data-testid="stSidebarCollapsedControl"] button {
+          border: 1px solid var(--pm-border) !important;
+          border-radius: var(--pm-radius-sm) !important;
+          background: rgba(255, 255, 255, 0.92) !important;
+          box-shadow: var(--pm-shadow-md) !important;
+        }
+        .block-container {
+          max-width: 1500px;
+          padding-top: 1rem;
+          padding-bottom: 3.2rem;
+        }
+        h1, h2, h3, h4, h5, h6 {
+          color: var(--pm-text);
+          letter-spacing: 0;
+        }
+        p, li, label, span, div {
+          color-scheme: light;
+        }
+
+        section[data-testid="stSidebar"] {
+          background: rgba(255, 255, 255, 0.72) !important;
+          backdrop-filter: blur(18px);
+          border-right: 1px solid rgba(148, 163, 184, 0.18);
+          box-shadow: 8px 0 28px rgba(15, 23, 42, 0.04);
+        }
+        section[data-testid="stSidebar"] > div {
+          padding-top: 18px;
+          padding-bottom: 18px;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] {
+          display: grid;
+          gap: 8px;
+          margin-top: 10px;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label {
+          min-height: 42px;
+          border: 1px solid transparent;
+          border-radius: 14px;
+          padding: 9px 11px;
+          color: var(--pm-text);
+          transition: 140ms ease;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
+          background: rgba(79, 70, 229, 0.06);
+          border-color: rgba(79, 70, 229, 0.12);
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+          background: linear-gradient(135deg, rgba(79, 70, 229, 0.12), rgba(8, 145, 178, 0.07));
+          border-color: rgba(79, 70, 229, 0.22);
+          box-shadow: inset 3px 0 0 var(--pm-primary), var(--pm-shadow-sm);
+        }
+        .pm-sidebar-brand {
+          border: 1px solid rgba(129, 140, 248, 0.24);
+          border-radius: 20px;
+          padding: 16px;
+          background:
+            radial-gradient(circle at top left, rgba(79, 70, 229, 0.16), transparent 42%),
+            rgba(255, 255, 255, 0.72);
+          box-shadow: var(--pm-shadow-sm);
+          margin-bottom: 14px;
+        }
+        .pm-sidebar-logo {
+          width: 36px;
+          height: 36px;
+          display: inline-grid;
+          place-items: center;
+          border-radius: 12px;
+          background: linear-gradient(135deg, var(--pm-primary), var(--pm-cyan));
+          color: #fff;
+          font-weight: 850;
+          margin-bottom: 12px;
+          box-shadow: 0 10px 22px rgba(79, 70, 229, 0.22);
+        }
+        .pm-sidebar-brand-title {
+          font-size: 19px;
+          font-weight: 850;
+          color: var(--pm-text);
+          line-height: 1.15;
+        }
+        .pm-sidebar-brand-subtitle {
+          margin-top: 4px;
+          color: var(--pm-text-muted);
+          font-size: 12px;
+          line-height: 1.45;
+        }
+        .pm-sidebar-section {
+          margin: 16px 0 7px 2px;
+          color: var(--pm-text-subtle);
+          font-size: 11px;
+          font-weight: 850;
+          letter-spacing: .08em;
+          text-transform: uppercase;
+        }
+        .pm-user-pill, .pm-sidebar-footer {
+          border: 1px solid var(--pm-border);
+          border-radius: 16px;
+          background: rgba(255, 255, 255, 0.68);
+          color: var(--pm-text-muted);
+          padding: 11px 12px;
+          font-size: 12px;
+          line-height: 1.55;
+          box-shadow: var(--pm-shadow-sm);
+        }
+        .pm-user-pill strong {
+          display: block;
+          color: var(--pm-text);
+          font-size: 13px;
+          margin-top: 2px;
+        }
+        .pm-sidebar-footer {
+          margin-top: 18px;
+        }
+
+        .stButton > button,
+        .stDownloadButton > button,
+        button[kind="secondary"] {
+          border-radius: 12px !important;
+          border: 1px solid var(--pm-border) !important;
+          color: var(--pm-text) !important;
+          background: rgba(255, 255, 255, 0.84) !important;
+          font-weight: 700 !important;
+          min-height: 2.55rem;
+          transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease, background 140ms ease;
+        }
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+          transform: translateY(-1px);
+          border-color: rgba(79, 70, 229, 0.36) !important;
+          box-shadow: var(--pm-shadow-md) !important;
+        }
+        .stButton > button[kind="primary"],
+        .stDownloadButton > button[kind="primary"],
+        button[kind="primary"] {
+          color: #fff !important;
+          border: 0 !important;
+          background: linear-gradient(135deg, var(--pm-primary), var(--pm-primary-2) 55%, var(--pm-cyan)) !important;
+          box-shadow: 0 12px 26px rgba(37, 99, 235, 0.20) !important;
+        }
+        div[data-testid="stTextInput"] input,
+        div[data-testid="stTextArea"] textarea,
+        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+          border-radius: 13px !important;
+          border-color: var(--pm-border) !important;
+          background: rgba(255, 255, 255, 0.88) !important;
+          color: var(--pm-text) !important;
+          box-shadow: none !important;
+        }
+        div[data-testid="stTextInput"] input:focus,
+        div[data-testid="stTextArea"] textarea:focus {
+          border-color: rgba(79, 70, 229, 0.54) !important;
+          box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.10) !important;
+        }
+        div[data-testid="stFileUploader"] {
+          border: 1px dashed rgba(79, 70, 229, 0.34);
+          border-radius: 22px;
+          padding: 12px;
+          background:
+            linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(238, 242, 255, 0.46));
+          transition: 140ms ease;
+        }
+        div[data-testid="stFileUploader"]:hover {
+          background: rgba(238, 242, 255, 0.66);
+          border-color: rgba(79, 70, 229, 0.52);
+        }
+        div[data-testid="stExpander"] {
+          border: 1px solid var(--pm-border) !important;
+          border-radius: 18px !important;
+          background: rgba(255, 255, 255, 0.76) !important;
+          box-shadow: var(--pm-shadow-sm);
+          overflow: hidden;
+        }
+        div[data-testid="stTabs"] [role="tablist"] {
+          gap: 8px;
+          border-bottom: 1px solid var(--pm-border);
+        }
+        div[data-testid="stTabs"] [role="tab"] {
+          border-radius: 12px 12px 0 0;
+          color: var(--pm-text-muted);
+          font-weight: 750;
+        }
+        div[data-testid="stTabs"] [aria-selected="true"] {
+          color: var(--pm-primary) !important;
+          background: rgba(79, 70, 229, 0.08);
+        }
+
+        .pm-hero, .pm-section-card, .pm-upload-card, .pm-reader-card, .pm-ask-card,
+        .pm-feedback-card, .pm-error-card, .pm-empty-state, .pm-library-panel,
+        .pm-detail-panel, .pm-library-toolbar, .pm-product-preview {
+          border: 1px solid var(--pm-border);
+          border-radius: var(--pm-radius-lg);
+          background: var(--pm-surface);
+          box-shadow: var(--pm-shadow-md);
+          backdrop-filter: blur(16px);
+        }
+        .pm-hero {
+          padding: 22px 24px;
+          margin-bottom: 16px;
+          background:
+            radial-gradient(circle at top left, rgba(79, 70, 229, 0.12), transparent 36%),
+            linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(248, 250, 252, 0.74));
+        }
+        .pm-hero-top {
+          display: flex;
+          justify-content: space-between;
+          gap: 18px;
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+        .pm-hero h1 {
+          margin: 0 0 6px 0;
+          font-size: clamp(28px, 3vw, 38px);
+          line-height: 1.12;
+          letter-spacing: 0;
+        }
+        .pm-hero p {
+          margin: 0;
+          color: var(--pm-text-muted);
+          line-height: 1.7;
+          max-width: 800px;
+        }
+        .pm-badges, .pm-toolbar, .pm-meta, .pm-chip-row {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .pm-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          border-radius: 999px;
+          padding: 4px 10px;
+          font-size: 12px;
+          font-weight: 850;
+          border: 1px solid var(--pm-border);
+          background: rgba(248, 250, 252, 0.88);
+          color: #475569;
+          white-space: nowrap;
+        }
+        .pm-badge-default { background: rgba(241,245,249,.9); color:#475569; border-color: rgba(148,163,184,.24); }
+        .pm-badge-primary { background: rgba(238,242,255,.95); color:#4338CA; border-color: rgba(129,140,248,.28); }
+        .pm-badge-info { background: rgba(236,254,255,.95); color:#0E7490; border-color: rgba(103,232,249,.32); }
+        .pm-badge-success { background: rgba(240,253,244,.95); color:#15803D; border-color: rgba(134,239,172,.36); }
+        .pm-badge-warning { background: rgba(255,251,235,.95); color:#B45309; border-color: rgba(253,186,116,.36); }
+        .pm-badge-danger { background: rgba(254,242,242,.95); color:#B91C1C; border-color: rgba(252,165,165,.42); }
+
+        .pm-section-card, .pm-upload-card, .pm-reader-card, .pm-ask-card, .pm-feedback-card {
+          padding: 18px;
+          margin-bottom: 16px;
+        }
+        .pm-section-heading {
+          display: flex;
+          justify-content: space-between;
+          gap: 14px;
+          align-items: flex-start;
+          margin-bottom: 12px;
+        }
+        .pm-section-title {
+          margin: 0;
+          font-size: 18px;
+          font-weight: 850;
+          color: var(--pm-text);
+        }
+        .pm-section-description {
+          margin: 5px 0 0 0;
+          color: var(--pm-text-muted);
+          font-size: 13px;
+          line-height: 1.6;
+        }
+        .pm-grid-metrics {
+          display: grid;
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+          gap: 12px;
+          margin: 14px 0 18px;
+        }
+        .pm-metric-card {
+          position: relative;
+          min-height: 104px;
+          padding: 14px;
+          border: 1px solid var(--pm-border);
+          border-radius: 18px;
+          background: rgba(255, 255, 255, 0.78);
+          box-shadow: var(--pm-shadow-sm);
+          transition: 140ms ease;
+          overflow: hidden;
+        }
+        .pm-metric-card:hover {
+          transform: translateY(-2px);
+          box-shadow: var(--pm-shadow-md);
+          border-color: rgba(79, 70, 229, 0.24);
+        }
+        .pm-metric-card::after {
+          content: "";
+          position: absolute;
+          inset: auto -18px -22px auto;
+          width: 78px;
+          height: 78px;
+          border-radius: 999px;
+          background: rgba(79, 70, 229, 0.06);
+        }
+        .pm-metric-card-success::after { background: rgba(22, 163, 74, 0.08); }
+        .pm-metric-card-warning::after { background: rgba(217, 119, 6, 0.08); }
+        .pm-metric-card-danger::after, .pm-metric-card-error::after { background: rgba(220, 38, 38, 0.08); }
+        .pm-metric-icon {
+          width: 28px;
+          height: 28px;
+          display: inline-grid;
+          place-items: center;
+          border-radius: 10px;
+          background: rgba(79, 70, 229, 0.09);
+          color: var(--pm-primary);
+          font-size: 15px;
+          margin-bottom: 9px;
+        }
+        .pm-metric-label {
+          color: var(--pm-text-muted);
+          font-size: 12px;
+          font-weight: 850;
+          margin-bottom: 6px;
+        }
+        .pm-metric-value {
+          color: var(--pm-text);
+          font-size: 19px;
+          font-weight: 850;
+          line-height: 1.25;
+          word-break: break-word;
+        }
+        .pm-metric-helper {
+          color: var(--pm-text-muted);
+          font-size: 12px;
+          line-height: 1.35;
+          margin-top: 7px;
+        }
+
+        .pm-auth-page {
+          min-height: calc(100vh - 110px);
+          display: grid;
+          align-items: center;
+          padding: 8px 0 28px;
+        }
+        .pm-auth-hero {
+          padding: 32px;
+          border-radius: var(--pm-radius-xl);
+          border: 1px solid rgba(129, 140, 248, 0.22);
+          background:
+            radial-gradient(circle at 12% 0%, rgba(79, 70, 229, 0.18), transparent 32%),
+            radial-gradient(circle at 92% 20%, rgba(8, 145, 178, 0.14), transparent 30%),
+            rgba(255, 255, 255, 0.54);
+          box-shadow: var(--pm-shadow-lg);
+          backdrop-filter: blur(18px);
+          min-height: 640px;
+        }
+        .pm-brand-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          border: 1px solid rgba(79, 70, 229, 0.18);
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.72);
+          padding: 7px 11px;
+          color: var(--pm-text);
+          font-size: 13px;
+          font-weight: 850;
+          box-shadow: var(--pm-shadow-sm);
+        }
+        .pm-brand-dot {
+          width: 24px;
+          height: 24px;
+          display: inline-grid;
+          place-items: center;
+          border-radius: 9px;
+          background: linear-gradient(135deg, var(--pm-primary), var(--pm-cyan));
+          color: #fff;
+          font-size: 12px;
+        }
+        .pm-hero-title {
+          margin: 28px 0 14px;
+          max-width: 760px;
+          font-size: clamp(34px, 4.2vw, 54px);
+          line-height: 1.08;
+          font-weight: 900;
+          letter-spacing: 0;
+          color: var(--pm-text);
+        }
+        .pm-hero-subtitle {
+          max-width: 740px;
+          color: #475569;
+          font-size: 16px;
+          line-height: 1.86;
+          margin-bottom: 16px;
+        }
+        .pm-auth-slogan {
+          color: var(--pm-primary);
+          font-weight: 850;
+          letter-spacing: .02em;
+          margin: 12px 0 20px;
+        }
+        .pm-feature-grid {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 12px;
+          margin: 24px 0;
+        }
+        .pm-feature-card {
+          border: 1px solid var(--pm-border);
+          border-radius: 18px;
+          padding: 14px;
+          background: rgba(255, 255, 255, 0.68);
+          box-shadow: var(--pm-shadow-sm);
+        }
+        .pm-feature-card strong {
+          display: block;
+          color: var(--pm-text);
+          margin-bottom: 6px;
+          font-size: 14px;
+        }
+        .pm-feature-card span {
+          color: var(--pm-text-muted);
+          font-size: 12px;
+          line-height: 1.55;
+        }
+        .pm-product-preview {
+          margin-top: 20px;
+          padding: 16px;
+          background:
+            linear-gradient(135deg, rgba(255,255,255,.82), rgba(248,250,252,.68));
+        }
+        .pm-preview-top {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: center;
+          margin-bottom: 12px;
+        }
+        .pm-floating-card {
+          border: 1px solid var(--pm-border);
+          border-radius: 16px;
+          background: rgba(255, 255, 255, 0.82);
+          padding: 12px;
+          margin-top: 10px;
+          box-shadow: var(--pm-shadow-sm);
+        }
+        .pm-preview-line {
+          height: 8px;
+          border-radius: 999px;
+          background: #E2E8F0;
+          margin: 8px 0;
+        }
+        .pm-preview-line.short { width: 58%; }
+        .pm-preview-line.mid { width: 78%; }
+        .pm-auth-card {
+          border: 1px solid var(--pm-border);
+          border-radius: var(--pm-radius-xl);
+          background: rgba(255, 255, 255, 0.82);
+          box-shadow: var(--pm-shadow-lg);
+          backdrop-filter: blur(18px);
+          padding: 26px;
+          min-height: 640px;
+        }
+        .pm-login-panel h2 {
+          margin: 0 0 6px;
+          font-size: 28px;
+          color: var(--pm-text);
+        }
+        .pm-login-panel p {
+          margin: 0 0 16px;
+          color: var(--pm-text-muted);
+          line-height: 1.65;
+        }
+        .pm-privacy-note {
+          border: 1px solid rgba(22, 163, 74, 0.18);
+          border-radius: 16px;
+          padding: 12px 13px;
+          background: rgba(240, 253, 244, 0.74);
+          color: #166534;
+          font-size: 13px;
+          line-height: 1.58;
+          margin-top: 16px;
+        }
+
+        .pm-workflow {
+          display: grid;
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+          gap: 10px;
+          margin: 4px 0 16px;
+        }
+        .pm-step {
+          display: flex;
+          gap: 10px;
+          align-items: center;
+          border: 1px solid var(--pm-border);
+          border-radius: 16px;
+          padding: 10px 11px;
+          background: rgba(255,255,255,.72);
+          box-shadow: var(--pm-shadow-sm);
+        }
+        .pm-step-dot {
+          width: 26px;
+          height: 26px;
+          border-radius: 999px;
+          display: inline-grid;
+          place-items: center;
+          font-size: 12px;
+          font-weight: 850;
+          background: #E2E8F0;
+          color: #64748B;
+          flex: 0 0 auto;
+        }
+        .pm-step-title {
+          color: var(--pm-text);
+          font-size: 13px;
+          font-weight: 850;
+          line-height: 1.2;
+        }
+        .pm-step-helper {
+          color: var(--pm-text-subtle);
+          font-size: 11px;
+          margin-top: 2px;
+        }
+        .pm-step-done .pm-step-dot { background: rgba(22,163,74,.12); color: var(--pm-success); }
+        .pm-step-active { border-color: rgba(79,70,229,.30); background: rgba(238,242,255,.78); }
+        .pm-step-active .pm-step-dot { background: var(--pm-primary); color: #fff; }
+        .pm-step-error { border-color: rgba(220,38,38,.28); background: rgba(254,242,242,.76); }
+        .pm-step-error .pm-step-dot { background: var(--pm-danger); color: #fff; }
+
+        .pm-file-capsule {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 12px;
+          border: 1px solid var(--pm-border);
+          border-radius: 18px;
+          background: rgba(248,250,252,.82);
+          padding: 12px 14px;
+          margin: 8px 0 12px;
+        }
+        .pm-reader-shell {
+          max-height: 78vh;
+          overflow-y: auto;
+          padding: 8px 12px 10px;
+          background: rgba(255,255,255,.78);
+          border: 1px solid rgba(148,163,184,.16);
+          border-radius: 18px;
+        }
+        .pm-reader-shell > * {
+          max-width: 860px;
+        }
+        .pm-reader-shell h1,
+        .pm-reader-shell h2,
+        .pm-reader-shell h3 {
+          color: var(--pm-text);
+          margin-top: 1.45em;
+          letter-spacing: 0;
+        }
+        .pm-reader-shell p,
+        .pm-reader-shell li {
+          color: #1E293B;
+          font-size: 15px;
+          line-height: 1.78;
+        }
+        .pm-reader-shell code,
+        .pm-reader-shell pre,
+        .pm-reader-shell table {
+          background: #F8FAFC;
+          border-radius: 12px;
+        }
+        .pm-chat-message {
+          border: 1px solid var(--pm-border);
+          border-radius: 18px;
+          padding: 13px 14px;
+          margin: 10px 0;
+          line-height: 1.72;
+          box-shadow: var(--pm-shadow-sm);
+        }
+        .pm-chat-user {
+          margin-left: 9%;
+          background: rgba(238,242,255,.88);
+          border-color: rgba(129,140,248,.28);
+        }
+        .pm-chat-assistant {
+          margin-right: 5%;
+          background: rgba(255,255,255,.86);
+        }
+        .pm-chat-role {
+          color: var(--pm-text-muted);
+          font-size: 12px;
+          font-weight: 850;
+          margin-bottom: 5px;
+        }
+        .pm-reference-card {
+          border: 1px solid rgba(37, 99, 235, 0.18);
+          border-radius: 18px;
+          background: rgba(255, 255, 255, 0.84);
+          padding: 14px;
+          margin: 10px 0;
+          box-shadow: var(--pm-shadow-sm);
+        }
+        .pm-reference-head {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 10px;
+          flex-wrap: wrap;
+          margin-bottom: 10px;
+        }
+        .pm-reference-title {
+          color: #1D4ED8;
+          font-weight: 850;
+        }
+        .pm-reference-text {
+          border-left: 3px solid rgba(37,99,235,.36);
+          border-radius: 14px;
+          background: rgba(248,250,252,.90);
+          color: #1E293B;
+          line-height: 1.72;
+          padding: 12px 13px;
+          white-space: pre-wrap;
+        }
+        .pm-reference-meta {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 8px;
+          margin-top: 10px;
+        }
+        .pm-reference-meta-item {
+          border: 1px solid rgba(148,163,184,.16);
+          border-radius: 12px;
+          background: rgba(248,250,252,.72);
+          color: var(--pm-text-muted);
+          font-size: 11px;
+          padding: 8px;
+        }
+        .pm-reference-meta-item strong {
+          display: block;
+          color: var(--pm-text);
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          font-size: 12px;
+          margin-top: 3px;
+          word-break: break-word;
+        }
+        .pm-source-link {
+          display: inline-flex;
+          align-items: center;
+          border: 1px solid rgba(37,99,235,.22);
+          border-radius: 999px;
+          padding: 3px 10px;
+          background: rgba(239,246,255,.88);
+          color: #1D4ED8;
+          font-size: 12px;
+          font-weight: 800;
+          text-decoration: none;
+          margin-top: 4px;
+        }
+        .pm-source-anchor { display: block; scroll-margin-top: 18px; height: 1px; }
+
+        .pm-library-toolbar {
+          padding: 16px;
+          margin: 10px 0 16px;
+          position: sticky;
+          top: 0.5rem;
+          z-index: 10;
+        }
+        .pm-library-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 14px;
+        }
+        .pm-literature-card {
+          border: 1px solid var(--pm-border);
+          border-radius: 20px;
+          background: rgba(255,255,255,.84);
+          box-shadow: var(--pm-shadow-sm);
+          padding: 16px;
+          margin-bottom: 12px;
+          transition: 150ms ease;
+          position: relative;
+          overflow: hidden;
+        }
+        .pm-literature-card:hover {
+          transform: translateY(-2px);
+          border-color: rgba(79,70,229,.34);
+          box-shadow: var(--pm-shadow-md);
+        }
+        .pm-literature-card-selected {
+          border-color: rgba(79,70,229,.54);
+          box-shadow: 0 0 0 4px rgba(79,70,229,.09), var(--pm-shadow-md);
+        }
+        .pm-literature-card-selected::before {
+          content: "";
+          position: absolute;
+          left: 0;
+          top: 0;
+          bottom: 0;
+          width: 4px;
+          background: linear-gradient(180deg, var(--pm-primary), var(--pm-cyan));
+        }
+        .pm-card-title {
+          color: var(--pm-text);
+          font-weight: 900;
+          font-size: 17px;
+          line-height: 1.38;
+          margin-right: 46px;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .pm-card-year {
+          position: absolute;
+          right: 14px;
+          top: 14px;
+          color: var(--pm-primary);
+          font-size: 12px;
+          font-weight: 900;
+          background: rgba(238,242,255,.92);
+          border: 1px solid rgba(129,140,248,.22);
+          border-radius: 999px;
+          padding: 3px 8px;
+        }
+        .pm-card-meta {
+          color: var(--pm-text-muted);
+          font-size: 12px;
+          line-height: 1.5;
+          margin: 8px 0 12px;
+        }
+        .pm-chip {
+          display: inline-flex;
+          align-items: center;
+          border: 1px solid rgba(148,163,184,.20);
+          border-radius: 999px;
+          padding: 4px 9px;
+          background: rgba(248,250,252,.82);
+          color: #475569;
+          font-size: 11px;
+          font-weight: 750;
+        }
+        .pm-card-summary {
+          border-radius: 15px;
+          background: rgba(248,250,252,.78);
+          border: 1px solid rgba(148,163,184,.15);
+          padding: 11px 12px;
+          color: #334155;
+          font-size: 13px;
+          line-height: 1.65;
+          margin-top: 10px;
+        }
+        .pm-card-footer {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          align-items: center;
+          color: var(--pm-text-subtle);
+          font-size: 11px;
+          margin-top: 12px;
+          border-top: 1px solid rgba(148,163,184,.14);
+          padding-top: 10px;
+        }
+        .pm-detail-panel {
+          padding: 18px;
+          margin-bottom: 16px;
+        }
+        .pm-detail-title {
+          margin: 0 0 8px;
+          color: var(--pm-text);
+          font-size: 24px;
+          line-height: 1.26;
+          font-weight: 900;
+        }
+        .pm-detail-section {
+          border: 1px solid rgba(148,163,184,.16);
+          border-radius: 16px;
+          background: rgba(248,250,252,.70);
+          padding: 13px 14px;
+          margin-top: 10px;
+        }
+        .pm-detail-section strong {
+          display: block;
+          color: var(--pm-primary);
+          font-size: 12px;
+          margin-bottom: 5px;
+        }
+        .pm-detail-section div {
+          color: #1E293B;
+          line-height: 1.68;
+          white-space: pre-wrap;
+        }
+        .pm-editing-badge {
+          display: inline-flex;
+          border-radius: 999px;
+          padding: 4px 10px;
+          background: rgba(255,251,235,.95);
+          color: #B45309;
+          border: 1px solid rgba(253,186,116,.34);
+          font-size: 12px;
+          font-weight: 850;
+          margin-bottom: 10px;
+        }
+        .pm-empty-state {
+          text-align: center;
+          padding: 30px 24px;
+          margin: 14px 0 16px;
+          background:
+            radial-gradient(circle at top, rgba(79,70,229,.08), transparent 36%),
+            rgba(255,255,255,.78);
+        }
+        .pm-empty-icon {
+          width: 48px;
+          height: 48px;
+          margin: 0 auto 12px;
+          display: grid;
+          place-items: center;
+          border-radius: 18px;
+          background: rgba(238,242,255,.92);
+          color: var(--pm-primary);
+          font-size: 22px;
+        }
+        .pm-empty-title {
+          color: var(--pm-text);
+          font-size: 19px;
+          font-weight: 900;
+          margin-bottom: 7px;
+        }
+        .pm-empty-description {
+          color: var(--pm-text-muted);
+          line-height: 1.7;
+          max-width: 640px;
+          margin: 0 auto;
+        }
+        .pm-empty-action {
+          display: inline-flex;
+          margin-top: 14px;
+          border: 1px solid rgba(79,70,229,.18);
+          border-radius: 999px;
+          padding: 6px 12px;
+          background: rgba(238,242,255,.92);
+          color: var(--pm-primary);
+          font-size: 12px;
+          font-weight: 850;
+        }
+        .pm-error-card {
+          padding: 16px;
+          margin: 12px 0 16px;
+          border-color: rgba(220,38,38,.22);
+          background: rgba(255,255,255,.88);
+          box-shadow: var(--pm-shadow-md);
+        }
+        .pm-error-card .pm-section-title { color: #B91C1C; }
+        iframe.pm-pdf {
+          border: 1px solid var(--pm-border);
+          border-radius: 18px;
+          background: #F8FAFC;
+        }
+
+        @media (max-width: 980px) {
+          .pm-feature-grid, .pm-workflow, .pm-grid-metrics, .pm-reference-meta, .pm-library-grid {
+            grid-template-columns: 1fr;
+          }
+          .pm-auth-hero, .pm-auth-card {
+            min-height: auto;
+          }
+          .pm-chat-user, .pm-chat-assistant {
+            margin-left: 0;
+            margin-right: 0;
+          }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_app_shell() -> None:
+    """Render a lightweight marker for the shared app shell."""
+    st.markdown('<div class="pm-app-shell"></div>', unsafe_allow_html=True)
+
+
+def render_app_header(
+    title: str,
+    subtitle: str,
+    status_badges: list[str] | None = None,
+) -> None:
+    """Render a polished page-level header."""
+    badges = "".join(status_badges or [])
+    st.markdown(
+        f"""
+        <div class="pm-hero">
+          <div class="pm-hero-top">
+            <div>
+              <h1>{html.escape(title)}</h1>
+              <p>{html.escape(subtitle)}</p>
+            </div>
+            <div class="pm-badges">{badges}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric_card(
+    label: str,
+    value: Any,
+    helper: str | None = None,
+    icon: str | None = None,
+    status: str | None = None,
+) -> None:
+    """Render a custom metric card with optional icon and status tone."""
+    status_name = "danger" if status == "error" else status
+    status_class = f" pm-metric-card-{html.escape(str(status_name))}" if status_name else ""
+    icon_html = f'<div class="pm-metric-icon">{html.escape(str(icon))}</div>' if icon else ""
+    helper_html = f'<div class="pm-metric-helper">{html.escape(helper)}</div>' if helper else ""
+    st.markdown(
+        f"""
+        <div class="pm-metric-card{status_class}">
+          {icon_html}
+          <div class="pm-metric-label">{html.escape(label)}</div>
+          <div class="pm-metric-value">{html.escape(str(value))}</div>
+          {helper_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_section_card(title: str, description: str | None = None) -> None:
+    """Render a consistent section heading card."""
+    description_html = (
+        f'<p class="pm-section-description">{html.escape(description)}</p>'
+        if description
+        else ""
+    )
+    st.markdown(
+        f"""
+        <div class="pm-section-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">{html.escape(title)}</h3>
+              {description_html}
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_empty_state(
+    title: str,
+    description: str,
+    action_label: str | None = None,
+    icon: str = "📄",
+) -> None:
+    """Render a calm empty state with an optional action hint."""
+    action_html = (
+        f'<div class="pm-empty-action">{html.escape(action_label)}</div>'
+        if action_label
+        else ""
+    )
+    st.markdown(
+        f"""
+        <div class="pm-empty-state">
+          <div class="pm-empty-icon">{html.escape(icon)}</div>
+          <div class="pm-empty-title">{html.escape(title)}</div>
+          <div class="pm-empty-description">{html.escape(description)}</div>
+          {action_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_error_card(title: str, message: str, detail: str | None = None) -> None:
+    """Render a friendly error card and fold technical detail."""
+    st.markdown(
+        f"""
+        <div class="pm-error-card">
+          <div class="pm-section-title">{html.escape(title)}</div>
+          <div class="pm-section-description">{html.escape(message)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if detail:
+        with st.expander("技术详情", expanded=False):
+            st.code(str(detail), language="text")
+
+
+def render_privacy_note() -> None:
+    """Render the local-first privacy note."""
+    st.markdown(
+        """
+        <div class="pm-privacy-note">
+          默认本地运行：论文文件、向量索引、BM25 索引和文献卡片保存在你的本地环境中。
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_auth_hero() -> None:
+    """Render the branded product hero for the auth page."""
+    st.markdown(
+        f"""
+        <div class="pm-auth-hero">
+          <div class="pm-brand-pill">
+            <span class="pm-brand-dot">PM</span>
+            <span>PaperMate · AI Research Workspace</span>
+          </div>
+          <div class="pm-hero-title">把论文阅读、可信问答和文献卡片整理在一个本地工作台里</div>
+          <div class="pm-hero-subtitle">
+            上传 PDF，PaperMate 会解析正文与图片，构建混合检索索引，并基于原文引用回答问题，帮助你沉淀可复用的文献卡片。
+          </div>
+          <div class="pm-auth-slogan">Upload. Read. Ask. Organize.</div>
+          <div class="pm-badges">
+            {render_status_badge("本地运行", "success")}
+            {render_status_badge("数据私有", "primary")}
+            {render_status_badge("可信引用", "info")}
+            {render_status_badge("Markdown 导出", "default")}
+          </div>
+          <div class="pm-feature-grid">
+            <div class="pm-feature-card"><strong>PDF 智能解析</strong><span>自动提取正文、章节、图片与 Markdown。</span></div>
+            <div class="pm-feature-card"><strong>可信引用问答</strong><span>回答基于论文原文片段和检索证据。</span></div>
+            <div class="pm-feature-card"><strong>文献卡片沉淀</strong><span>将研究问题、方法、贡献和局限保存进卡片库。</span></div>
+          </div>
+          <div class="pm-product-preview">
+            <div class="pm-preview-top">
+              <strong>论文工作台预览</strong>
+              {render_status_badge("RAG 就绪", "success")}
+            </div>
+            <div class="pm-floating-card">
+              <div class="pm-card-meta">论文正文 · Method · Page 3</div>
+              <div class="pm-preview-line mid"></div>
+              <div class="pm-preview-line"></div>
+              <div class="pm-preview-line short"></div>
+            </div>
+            <div class="pm-floating-card">
+              <div class="pm-card-meta">Ask PaperMate</div>
+              <strong>核心方法是什么？</strong>
+              <div class="pm-preview-line mid"></div>
+              <div class="pm-badges" style="margin-top:10px;">
+                {render_status_badge("[1] Page 3", "info")}
+                {render_status_badge("答案有依据", "success")}
+              </div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_auth_card() -> None:
+    """Render login and registration controls as a product card."""
+    st.markdown(
+        """
+        <div class="pm-auth-card">
+          <div class="pm-login-panel">
+            <h2>欢迎回来</h2>
+            <p>继续你的论文阅读与研究整理。</p>
+          </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    login_tab, register_tab = st.tabs(["登录", "注册"])
+
+    with login_tab:
+        with st.form("login_form_v2"):
+            username = st.text_input("用户名", key="login_username", placeholder="输入用户名")
+            password = st.text_input("密码", type="password", key="login_password", placeholder="输入密码")
+            submitted = st.form_submit_button("登录 PaperMate", type="primary", use_container_width=True)
+
+        if submitted:
+            user = authenticate_user(username, password)
+            if not user:
+                render_error_card("登录失败", "请检查用户名或密码后再试。")
+            else:
+                prepare_user_workspace(int(user["user_id"]))
+                set_current_user(user)
+                st.toast("登录成功。")
+                st.rerun()
+
+    with register_tab:
+        with st.form("register_form_v2"):
+            username = st.text_input("用户名", key="register_username", placeholder="3-32 位用户名")
+            password = st.text_input("密码", type="password", key="register_password", placeholder="至少 6 位")
+            password_confirm = st.text_input(
+                "确认密码",
+                type="password",
+                key="register_password_confirm",
+                placeholder="再次输入密码",
+            )
+            submitted = st.form_submit_button("创建账户", type="primary", use_container_width=True)
+
+        if submitted:
+            if password != password_confirm:
+                render_error_card("注册失败", "两次输入的密码不一致。")
+            else:
+                try:
+                    user = create_user(username, password)
+                    prepare_user_workspace(int(user["user_id"]))
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    render_error_card("注册失败", str(exc) or "注册失败，请稍后再试。")
+                else:
+                    set_current_user(user)
+                    st.toast("账户已创建。")
+                    st.rerun()
+
+    render_privacy_note()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_auth_page() -> None:
+    """Render the upgraded auth landing page."""
+    st.markdown('<div class="pm-auth-page">', unsafe_allow_html=True)
+    left_col, right_col = st.columns([0.55, 0.45], gap="large")
+    with left_col:
+        render_auth_hero()
+    with right_col:
+        render_auth_card()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_sidebar(user: dict[str, Any]) -> str:
+    """Render the research-workspace sidebar and return the selected page."""
+    processed_pdf = st.session_state.get("processed_pdf")
+    paper_id = str((processed_pdf or {}).get("saved_file", {}).get("paper_id") or "")
+    index_state = local_index_state(paper_id) if paper_id else {"vector": "未知", "bm25": "未知"}
+    rag_ready = index_state.get("vector") == "已构建" or index_state.get("bm25") == "已构建"
+
+    st.sidebar.markdown(
+        f"""
+        <div class="pm-sidebar-brand">
+          <div class="pm-sidebar-logo">PM</div>
+          <div class="pm-sidebar-brand-title">PaperMate</div>
+          <div class="pm-sidebar-brand-subtitle">本地 RAG 论文阅读器</div>
+        </div>
+        <div class="pm-user-pill">
+          当前用户
+          <strong>{html.escape(str(user["username"]))}</strong>
+        </div>
+        <div class="pm-sidebar-section">研究工作台</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    page_labels = {
+        "📄 论文工作台": "论文工作台",
+        "🗂 文献卡片库": "文献卡片库",
+        "🧪 反馈记录": "反馈记录",
+    }
+    selected_label = st.sidebar.radio(
+        "页面",
+        list(page_labels.keys()),
+        key="pm_nav_page",
+        label_visibility="collapsed",
+    )
+
+    st.sidebar.markdown(
+        f"""
+        <div class="pm-sidebar-footer">
+          <div class="pm-badges">
+            {render_status_badge("本地模式", "success")}
+            {render_status_badge("私有存储", "primary")}
+          </div>
+          <div style="margin-top:10px;">{render_status_badge("RAG 就绪" if rag_ready else "RAG 未就绪", "success" if rag_ready else "warning")}</div>
+          <div style="margin-top:10px;">版本：v{html.escape(__version__)}</div>
+          <div>PDF 解析 · Hybrid RAG · 文献卡片</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.sidebar.button("退出登录", use_container_width=True):
+        clear_authenticated_session()
+        st.rerun()
+
+    return page_labels[selected_label]
+
+
+def render_workflow_steps(steps: list[dict[str, str]]) -> None:
+    """Render the upload-to-card workflow progress strip."""
+    items = []
+    for index, step in enumerate(steps, start=1):
+        status = html.escape(str(step.get("status") or "pending"))
+        title = html.escape(str(step.get("title") or ""))
+        helper = html.escape(str(step.get("helper") or ""))
+        items.append(
+            f"""
+            <div class="pm-step pm-step-{status}">
+              <div class="pm-step-dot">{index}</div>
+              <div>
+                <div class="pm-step-title">{title}</div>
+                <div class="pm-step-helper">{helper}</div>
+              </div>
+            </div>
+            """
+        )
+    st.markdown(f'<div class="pm-workflow">{"".join(items)}</div>', unsafe_allow_html=True)
+
+
+def render_processed_pdf_summary(processed_pdf: dict[str, Any]) -> None:
+    """Render uploaded-file metadata and downloads in a polished card."""
+    saved_file = processed_pdf["saved_file"]
+    parsed_pdf = processed_pdf["parsed_pdf"]
+    st.markdown(
+        f"""
+        <div class="pm-upload-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">论文已解析</h3>
+              <p class="pm-section-description">文件已保存到本地，并转换为可阅读、可检索的 Markdown。</p>
+            </div>
+            <div class="pm-badges">{render_status_badge("解析完成", "success")}</div>
+          </div>
+          <div class="pm-file-capsule">
+            <div>
+              <strong>{html.escape(saved_file["file_name"])}</strong>
+              <div class="pm-card-meta">{html.escape(saved_file["file_size"])} · paper_id: {html.escape(saved_file["paper_id"])}</div>
+            </div>
+            <div class="pm-badges">
+              {render_status_badge(f"页数 {parsed_pdf.get('page_count', 0)}", "info")}
+              {render_status_badge(f"图片 {len(parsed_pdf.get('images', []))} 张", "primary")}
+              {render_status_badge(f"字符 {processed_pdf.get('total_chars', 0)}", "default")}
+            </div>
+          </div>
+          <div class="pm-card-meta">本地路径：{html.escape(saved_file["save_path"])}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    markdown_path = Path(parsed_pdf.get("markdown_path") or "")
+    if parsed_pdf.get("markdown_path") and markdown_path.exists():
+        st.download_button(
+            "下载完整 Markdown",
+            data=markdown_path.read_bytes(),
+            file_name="full.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+    render_extracted_images(parsed_pdf.get("images", []))
+
+
+def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
+    """Render the paper Markdown in a long-reading optimized container."""
+    parsed_pdf = processed_pdf["parsed_pdf"]
+    markdown = parsed_pdf.get("markdown", "") or processed_pdf["preview"]
+    safe_markdown = markdown_for_display(markdown, parsed_pdf.get("images", []))
+    paper_header, body_markdown = split_paper_header(safe_markdown)
+    anchored_body, _missing_chunks = add_chunk_anchors_to_markdown(
+        body_markdown or safe_markdown,
+        processed_pdf.get("chunks", []),
+    )
+
+    st.markdown(
+        f"""
+        <div class="pm-reader-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">论文正文</h3>
+              <p class="pm-section-description">适合长时间阅读的 Markdown 视图，引用片段可从问答区跳回原文。</p>
+            </div>
+          </div>
+          <div class="pm-toolbar" style="margin-bottom:12px;">
+            {render_status_badge(f"解析方式 {parsed_pdf.get('parser', '未知')}", "primary")}
+            {render_status_badge(f"页数 {parsed_pdf.get('page_count', 0)}", "info")}
+            {render_status_badge(f"图片 {len(parsed_pdf.get('images', []))} 张", "default")}
+            {render_status_badge(f"Chunks {len(processed_pdf.get('chunks', []))}", "success")}
+          </div>
+          <div class="pm-reader-shell">
+        """,
+        unsafe_allow_html=True,
+    )
+    if paper_header:
+        st.markdown("##### 开头信息")
+        st.write("标题：", paper_header.get("title") or "未识别")
+        st.write("作者：", paper_header.get("authors") or "未识别")
+    st.markdown(anchored_body or "暂无 Markdown 内容", unsafe_allow_html=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def render_index_builder(chunks: list[dict[str, Any]]) -> None:
+    """Render the hybrid index build action with clearer status."""
+    if not chunks:
+        render_empty_state("还没有可检索内容", "论文正文为空，当前没有可入库的 chunk。", icon="🧩")
+        return
+
+    paper_id = str(chunks[0].get("paper_id") or "")
+    index_state = local_index_state(paper_id)
+    st.markdown(
+        f"""
+        <div class="pm-section-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">构建论文索引</h3>
+              <p class="pm-section-description">同时构建 Chroma 向量索引和 BM25 关键词索引，问答时会自动做 Hybrid Retrieval + RRF 融合排序。</p>
+            </div>
+            <div class="pm-badges">
+              {render_status_badge(f"向量 {index_state['vector']}", index_status_type(index_state['vector']))}
+              {render_status_badge(f"BM25 {index_state['bm25']}", index_status_type(index_state['bm25']))}
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.button("构建论文索引", type="primary", use_container_width=True, key="build_paper_index"):
+        vector_count: int | None = None
+        bm25_result: dict[str, Any] | None = None
+        vector_error: Exception | None = None
+        bm25_error: Exception | None = None
+
+        with st.spinner("正在构建 Hybrid 索引..."):
+            try:
+                vector_count = VectorStore().add_chunks(chunks)
+            except (EmbeddingError, VectorStoreError) as exc:
+                vector_error = exc
+                logger.exception("Vector index build failed. paper_id=%s", paper_id)
+
+            try:
+                bm25_result = BM25Store().build_index(paper_id, chunks)
+            except AppError as exc:
+                bm25_error = exc
+                logger.exception("BM25 index build failed. paper_id=%s", paper_id)
+
+        st.session_state[f"index_state_{paper_id}"] = {
+            "vector": "已构建" if vector_error is None else "失败",
+            "bm25": "已构建" if bm25_error is None else "失败",
+        }
+        if vector_error is None and bm25_error is None:
+            st.toast("论文索引已构建。")
+            st.success(
+                f"论文索引构建完成。向量 chunk：{vector_count or 0}；关键词 chunk：{bm25_result.get('chunk_count', 0) if bm25_result else 0}。"
+            )
+            return
+        if vector_error is None and bm25_error is not None:
+            st.warning("向量索引已构建成功，但关键词索引构建失败。当前仍可使用语义检索。")
+            return
+        if vector_error is not None and bm25_error is None:
+            st.warning("关键词索引已构建成功，但向量索引构建失败。当前可使用关键词检索。")
+            return
+        render_error_card(
+            "索引构建失败",
+            "请检查 API Key、网络连接和本地写入权限后重试。",
+            f"vector_error={vector_error}; bm25_error={bm25_error}",
+        )
+
+
+def render_chat_message(role: str, content: str) -> None:
+    """Render a ChatGPT-style message bubble."""
+    normalized_role = "user" if role == "user" else "assistant"
+    role_label = "你" if normalized_role == "user" else "PaperMate"
+    safe_content = html.escape(str(content or "")).replace("\n", "<br>")
+    st.markdown(
+        f"""
+        <div class="pm-chat-message pm-chat-{normalized_role}">
+          <div class="pm-chat-role">{role_label}</div>
+          <div>{safe_content}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_reference_card(ref: dict[str, Any], index: int, expanded: bool = False) -> None:
+    """Render one trusted citation as an evidence card."""
+    citation_id = ref.get("citation_id") or index
+    page_label = format_page_label(ref.get("page_num"))
+    section_title = ref.get("section_title") or "未知章节"
+    source_ranks = ref.get("source_ranks") or {}
+    vector_rank = source_ranks.get("vector") or ref.get("vector_rank") or "无"
+    bm25_rank = source_ranks.get("bm25") or ref.get("bm25_rank") or "无"
+    rrf_score = format_optional_float(ref.get("rrf_score")) or "无"
+    preview = ref.get("text_preview") or ref.get("text") or ""
+    relevance = "高相关" if ref.get("rrf_score") else "答案依据"
+    st.markdown(
+        f"""
+        <div class="pm-reference-card">
+          <div class="pm-reference-head">
+            <div class="pm-reference-title">[{html.escape(str(citation_id))}] {html.escape(page_label)} · {html.escape(str(section_title))}</div>
+            <div class="pm-badges">{render_status_badge(relevance, "success")}</div>
+          </div>
+          <div class="pm-reference-text">{html.escape(str(preview))}</div>
+          <div class="pm-reference-meta">
+            <div class="pm-reference-meta-item">RRF 分数<strong>{html.escape(rrf_score)}</strong></div>
+            <div class="pm-reference-meta-item">Vector Rank<strong>{html.escape(str(vector_rank))}</strong></div>
+            <div class="pm-reference-meta-item">BM25 Rank<strong>{html.escape(str(bm25_rank))}</strong></div>
+            <div class="pm-reference-meta-item">Chunk ID<strong>{html.escape(str(ref.get("chunk_id", "")))}</strong></div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(source_anchor_link(ref.get("chunk_id"), "回到原文"), unsafe_allow_html=True)
+
+
+def render_citations(citations: list[dict[str, Any]]) -> None:
+    """Render citations produced from chunk metadata."""
+    st.markdown("#### 可信引用")
+    if not citations:
+        render_empty_state("暂无可信引用", "当前回答没有可展示的引用来源。", icon="🔎")
+        return
+    for index, citation in enumerate(citations[:3], start=1):
+        render_reference_card(citation, index, expanded=True)
+    if len(citations) > 3:
+        with st.expander(f"查看更多引用（{len(citations) - 3} 条）", expanded=False):
+            for index, citation in enumerate(citations[3:], start=4):
+                render_reference_card(citation, index)
+
+
+def render_qa_box(paper_id: str) -> None:
+    """Render RAG question-answering controls."""
+    index_state = local_index_state(paper_id)
+    index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
+    st.markdown(
+        f"""
+        <div class="pm-ask-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">Ask PaperMate</h3>
+              <p class="pm-section-description">只基于论文原文和引用片段回答，适合追问方法、实验、贡献和局限。</p>
+            </div>
+            <div class="pm-badges">
+              {render_status_badge(f"向量 {index_state['vector']}", index_status_type(index_state['vector']))}
+              {render_status_badge(f"BM25 {index_state['bm25']}", index_status_type(index_state['bm25']))}
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if not index_ready:
+        render_empty_state(
+            "还没有可检索索引",
+            "请先构建索引，然后再开始基于论文原文问答。",
+            "先构建论文索引",
+            icon="🧭",
+        )
+        return
+
+    quick_questions = [
+        "这篇论文解决了什么问题？",
+        "核心方法是什么？",
+        "实验结果说明了什么？",
+        "有哪些局限性？",
+        "帮我总结创新点",
+    ]
+    quick_cols = st.columns([1, 1, 1])
+    for index, quick_question in enumerate(quick_questions):
+        with quick_cols[index % 3]:
+            if st.button(
+                quick_question,
+                key=f"quick_question_{paper_id}_{index}",
+                use_container_width=True,
+            ):
+                st.session_state[f"question_{paper_id}"] = quick_question
+
+    with st.form(key=f"ask_form_{paper_id}"):
+        question = st.text_area(
+            "输入你的问题",
+            placeholder="例如：这篇论文的核心方法是什么？",
+            key=f"question_{paper_id}",
+            height=96,
+        )
+        submitted = st.form_submit_button("基于论文原文提问", type="primary", use_container_width=True)
+
+    if submitted:
+        if not question.strip():
+            st.warning("请输入问题。")
+            return
+        try:
+            with st.spinner("正在检索论文片段并生成回答..."):
+                rag_result = answer_question(paper_id, question)
+        except AppError as exc:
+            logger.exception("RAG question answering failed. paper_id=%s", paper_id)
+            if exc.code in {ErrorCode.VECTOR_SEARCH_FAILED, ErrorCode.BM25_INDEX_MISSING}:
+                render_error_card("还没有可检索索引", "请先构建论文索引后再提问。", exc.detail)
+            else:
+                render_error_card("问答失败", "请查看日志或检查模型与索引配置。", exc.detail)
+            return
+        except Exception as exc:
+            logger.exception("Unexpected RAG question answering failure. paper_id=%s", paper_id)
+            render_error_card("问答失败", "请查看日志或检查模型与索引配置。", str(exc))
+            return
+
+        qa_log_id = rag_result.get("qa_id")
+        if qa_log_id is None:
+            try:
+                qa_log_id = save_qa_log(paper_id, question.strip(), rag_result["answer"])
+            except (OSError, sqlite3.Error):
+                logger.exception("QA log save failed. paper_id=%s", paper_id)
+                st.warning("问答记录保存失败，但不影响当前回答。")
+
+        st.session_state[f"last_qa_{paper_id}"] = {
+            "paper_id": paper_id,
+            "question": question.strip(),
+            "answer": rag_result["answer"],
+            "citations": rag_result["citations"],
+            "source_chunks": rag_result["source_chunks"],
+            "retrieval_details": rag_result.get("retrieval_details") or rag_result.get("retrieval_debug", {}),
+            "qa_log_id": qa_log_id,
+        }
+
+    qa_record = st.session_state.get(f"last_qa_{paper_id}")
+    if qa_record:
+        render_chat_message("user", qa_record["question"])
+        render_chat_message("assistant", qa_record["answer"])
+        if needs_index_warning(qa_record.get("retrieval_details", {})):
+            st.warning("请先构建论文索引后再提问。")
+        render_citations(qa_record["citations"])
+        render_retrieval_details(qa_record.get("retrieval_details", {}))
+        render_source_chunks(qa_record["source_chunks"])
+        render_feedback_form(qa_record)
+
+
+def render_literature_card_save(
+    paper_id: str,
+    chunks: list[dict[str, Any]],
+    db_save_failed: bool,
+    user_id: int,
+) -> None:
+    """Render literature-card generation and persistence."""
+    st.markdown(
+        f"""
+        <div class="pm-section-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">生成文献卡片</h3>
+              <p class="pm-section-description">从当前论文中提取研究问题、方法、贡献、实验、局限性和个人笔记，沉淀为可管理的研究卡片。</p>
+            </div>
+            <div class="pm-badges">{render_status_badge("Markdown 可编辑", "primary")}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if not chunks:
+        render_empty_state("暂时无法生成卡片", "论文正文为空，暂时无法生成文献卡片。", icon="🗂")
+        return
+    if db_save_failed:
+        st.warning("数据库保存失败，文献卡片可能无法基于完整 chunks 生成。")
+
+    try:
+        libraries = list_card_libraries(user_id)
+    except (OSError, sqlite3.Error) as exc:
+        render_error_card("卡片库读取失败", "请检查 SQLite 数据库权限。", str(exc))
+        return
+    if not libraries:
+        render_empty_state("没有可用卡片库", "当前用户还没有可用的卡片库，请先创建一个卡片库。", icon="🗂")
+        return
+
+    selected_library_id = st.selectbox(
+        "保存到卡片库",
+        options=[int(library["library_id"]) for library in libraries],
+        format_func=lambda library_id: next(
+            f"{library['name']}（{library.get('card_count', 0)} 张）"
+            for library in libraries
+            if int(library["library_id"]) == int(library_id)
+        ),
+        key=f"target_library_{paper_id}",
+    )
+    with st.expander("新建卡片库", expanded=False):
+        render_library_create_form(user_id, key_suffix=f"_for_{paper_id}")
+
+    generated_key = f"generated_card_markdown_{paper_id}"
+    if st.button("生成文献卡片", type="primary", use_container_width=True, key=f"generate_card_{paper_id}"):
+        try:
+            with st.spinner("正在生成文献卡片..."):
+                st.session_state[generated_key] = generate_literature_card(paper_id)
+        except LLMError as exc:
+            render_error_card("文献卡片生成失败", exc.message, f"错误码：{exc.code.value}")
+            return
+
+    generated_markdown = st.session_state.get(generated_key)
+    if generated_markdown:
+        with st.expander("生成结果预览", expanded=True):
+            st.markdown(generated_markdown)
+            st.text_area(
+                "Markdown 原文",
+                value=generated_markdown,
+                height=260,
+                key=f"generated_card_preview_{paper_id}",
+            )
+
+        if st.button("保存到所选卡片库", type="primary", use_container_width=True, key=f"save_card_{paper_id}"):
+            try:
+                card_id = save_literature_card(
+                    paper_id,
+                    str(st.session_state.get(f"generated_card_preview_{paper_id}") or generated_markdown),
+                    user_id=user_id,
+                    library_id=int(selected_library_id),
+                )
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                render_error_card("文献卡片保存失败", str(exc) or "请检查 SQLite 数据库权限。")
+                return
+
+            st.session_state[f"saved_card_id_{paper_id}"] = card_id
+            library = get_card_library(int(selected_library_id), user_id)
+            library_name = library["name"] if library else "所选卡片库"
+            st.toast("文献卡片已保存。")
+            st.success(f"新文献卡片已保存到「{library_name}」。")
+
+    saved_card = get_literature_card_by_paper(paper_id, user_id=user_id)
+    if saved_card:
+        with st.expander("最近保存的卡片预览", expanded=False):
+            render_literature_card(saved_card)
+
+
+def render_workspace_page() -> None:
+    """Render the upgraded two-column paper workspace page."""
+    processed_pdf: dict[str, Any] | None = st.session_state.get("processed_pdf")
+    paper_id = str((processed_pdf or {}).get("saved_file", {}).get("paper_id") or "")
+    index_state = local_index_state(paper_id) if paper_id else {"vector": "未知", "bm25": "未知"}
+    index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
+    qa_done = bool(paper_id and st.session_state.get(f"last_qa_{paper_id}"))
+    card_done = bool(paper_id and st.session_state.get(f"saved_card_id_{paper_id}"))
+
+    render_app_header(
+        "论文工作台",
+        "上传 PDF，解析正文，构建 Hybrid RAG 索引，并基于可信引用追问论文。",
+        [
+            render_status_badge("本地运行", "success"),
+            render_status_badge("可信引用", "info"),
+            render_status_badge("知识沉淀", "primary"),
+        ],
+    )
+
+    workflow_status = [
+        {"title": "上传 PDF", "helper": "选择论文文件", "status": "done" if processed_pdf else "active"},
+        {"title": "解析正文", "helper": "Markdown 与图片", "status": "done" if processed_pdf else "pending"},
+        {"title": "构建索引", "helper": "Chroma + BM25", "status": "done" if index_ready else ("active" if processed_pdf else "pending")},
+        {"title": "开始问答", "helper": "基于原文引用", "status": "done" if qa_done else ("active" if index_ready else "pending")},
+        {"title": "生成卡片", "helper": "沉淀研究笔记", "status": "done" if card_done else ("active" if qa_done else "pending")},
+    ]
+    if processed_pdf and processed_pdf.get("db_save_failed"):
+        workflow_status[1]["status"] = "error"
+    render_workflow_steps(workflow_status)
+
+    saved_file = processed_pdf.get("saved_file", {}) if processed_pdf else {}
+    chunks = processed_pdf.get("chunks", []) if processed_pdf else []
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        render_metric_card("当前论文", saved_file.get("file_name") or "未上传", "上传 PDF 后开始解析", icon="📄")
+    with metric_cols[1]:
+        render_metric_card(
+            "解析状态",
+            "已完成" if processed_pdf else "未开始",
+            "正文、图片与页码",
+            icon="🧾",
+            status="success" if processed_pdf else "warning",
+        )
+    with metric_cols[2]:
+        render_metric_card("Chunk 数量", len(chunks), "用于检索的论文片段", icon="🧩")
+    with metric_cols[3]:
+        render_metric_card("向量索引", index_state["vector"], "Chroma 语义检索", icon="◎", status=index_status_type(index_state["vector"]))
+    with metric_cols[4]:
+        render_metric_card("BM25 状态", index_state["bm25"], "关键词精确检索", icon="#", status=index_status_type(index_state["bm25"]))
+
+    st.markdown(
+        """
+        <div class="pm-upload-card">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">上传与解析</h3>
+              <p class="pm-section-description">拖拽或选择一篇 PDF。解析完成后可下载 Markdown、图片 ZIP，并继续构建检索索引。</p>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    uploaded_file = st.file_uploader(
+        "选择一篇 PDF 论文",
+        type=["pdf"],
+        accept_multiple_files=False,
+    )
+
+    if uploaded_file is None:
+        if processed_pdf:
+            st.info("已恢复当前会话中的论文工作台内容。需要换论文时，重新上传 PDF 即可。")
+        else:
+            render_empty_state(
+                "还没有论文",
+                "上传一篇 PDF，PaperMate 会帮你解析正文、构建索引并开始问答。",
+                "选择 PDF 文件",
+                icon="📄",
+            )
+            return
+    else:
+        signature = get_uploaded_file_signature(uploaded_file)
+        cached_pdf = processed_pdf if processed_pdf and processed_pdf.get("signature") == signature else None
+        st.markdown(
+            f"""
+            <div class="pm-file-capsule">
+              <div>
+                <strong>{html.escape(uploaded_file.name)}</strong>
+                <div class="pm-card-meta">{format_file_size(len(uploaded_file.getvalue()))} · 已选择，等待本地解析</div>
+              </div>
+              <div class="pm-badges">{render_status_badge("PDF", "primary")}{render_status_badge("本地保存", "success")}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if cached_pdf:
+            processed_pdf = cached_pdf
+            if st.button("重新解析当前 PDF", use_container_width=True):
+                st.session_state.pop("processed_pdf", None)
+                st.rerun()
+        else:
+            processed_pdf = None
+            st.info("PDF 已上传到页面，点击下方按钮后开始解析。MinerU 解析可能需要数十秒到数分钟。")
+            if st.button("开始解析 PDF", type="primary", use_container_width=True, key="start_pdf_parse"):
+                try:
+                    with st.spinner("正在保存 PDF 并转换为 Markdown..."):
+                        processed_pdf = process_uploaded_pdf(uploaded_file)
+                except (UploadError, PdfParseError, MinerUError) as exc:
+                    logger.exception("PDF upload or parse failed.")
+                    render_error_card(
+                        "PDF 解析失败",
+                        f"{exc.message} 请检查文件、解析服务配置或网络连接后重试。",
+                        f"错误码：{exc.code.value}",
+                    )
+                    processed_pdf = None
+
+    if not processed_pdf:
+        return
+    if processed_pdf["db_save_failed"]:
+        render_error_card("数据保存失败", "解析结果可以继续查看，但 RAG 和文献卡片可能无法使用。请检查 SQLite 数据库权限。")
+
+    render_processed_pdf_summary(processed_pdf)
+    render_index_builder(processed_pdf["chunks"])
+
+    st.divider()
+    left_col, right_col = st.columns([0.60, 0.40], gap="large")
+    with left_col:
+        render_markdown_document(processed_pdf)
+    with right_col:
+        render_qa_box(processed_pdf["saved_file"]["paper_id"])
+        render_literature_card_save(
+            processed_pdf["saved_file"]["paper_id"],
+            processed_pdf["chunks"],
+            processed_pdf["db_save_failed"],
+            current_user_id(),
+        )
+
+
+def render_literature_card(card: dict[str, Any], selected: bool = False) -> None:
+    """Render one saved literature card as a research-note card."""
+    title = _pm_text(card.get("title"), "未命名论文")
+    authors = _pm_text(card.get("authors"), "作者未识别")
+    year = _pm_text(card.get("year"), "年份未知")
+    library_name = _pm_text(card.get("library_name"), "未分组")
+    question = _pm_compact(card.get("research_question"), 170)
+    method = _pm_compact(card.get("method_summary"), 150)
+    datasets = _pm_compact(card.get("datasets"), 120)
+    updated_at = _pm_text(card.get("updated_at"), "暂无更新时间")
+    chips = "".join(f'<span class="pm-chip">{html.escape(chip)}</span>' for chip in _pm_method_chips(card))
+    selected_class = " pm-literature-card-selected" if selected else ""
+    pdf_badge = render_status_badge("已关联 PDF", "success") if card.get("save_path") else render_status_badge("未关联 PDF", "warning")
+
+    st.markdown(
+        f"""
+        <div class="pm-literature-card{selected_class}">
+          <div class="pm-card-year">{html.escape(year)}</div>
+          <div class="pm-card-title">{html.escape(title)}</div>
+          <div class="pm-card-meta">{html.escape(authors)}</div>
+          <div class="pm-chip-row">{chips}</div>
+          <div class="pm-card-summary"><strong>研究问题</strong><br>{html.escape(question)}</div>
+          <div class="pm-card-summary"><strong>方法与证据</strong><br>{html.escape(method)}<br><span class="pm-card-meta">{html.escape(datasets)}</span></div>
+          <div class="pm-card-footer">
+            <span>{html.escape(library_name)} · {html.escape(updated_at)}</span>
+            <span>{pdf_badge}</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_card_visual(card: dict[str, Any]) -> None:
+    """Backward-compatible wrapper for the literature card UI."""
+    render_literature_card(card)
+
+
+def render_literature_detail(card: dict[str, Any], mode: str = "preview") -> None:
+    """Render a Notion/Readwise-style literature-card detail panel."""
+    markdown = str(card.get("markdown") or "")
+    title = _pm_text(card.get("title"), "未命名论文")
+    authors = _pm_text(card.get("authors"), "作者未识别")
+    year = _pm_text(card.get("year"), "年份未知")
+    library_name = _pm_text(card.get("library_name"), "未分组")
+    updated_at = _pm_text(card.get("updated_at"), "暂无更新时间")
+    editing = mode == "edit"
+    editing_badge = '<div class="pm-editing-badge">正在编辑</div>' if editing else ""
+    sections = [
+        ("研究问题", card.get("research_question")),
+        ("核心方法", card.get("method_summary")),
+        ("主要贡献", _pm_markdown_section(markdown, ("主要贡献", "贡献摘要", "论文贡献"))),
+        ("实验结论", card.get("datasets")),
+        ("局限性", _pm_markdown_section(markdown, ("局限性", "局限", "不足"))),
+        ("我的笔记", _pm_markdown_section(markdown, ("我的笔记", "个人笔记", "复习线索"))),
+    ]
+    section_html = "".join(
+        f"""
+        <div class="pm-detail-section">
+          <strong>{html.escape(label)}</strong>
+          <div>{html.escape(_pm_text(value, "原文未明确说明"))}</div>
+        </div>
+        """
+        for label, value in sections
+    )
+    st.markdown(
+        f"""
+        <div class="pm-detail-panel">
+          {editing_badge}
+          <h2 class="pm-detail-title">{html.escape(title)}</h2>
+          <div class="pm-badges" style="margin-bottom:10px;">
+            {render_status_badge(year, "primary")}
+            {render_status_badge(library_name, "default")}
+            {render_status_badge("Markdown 可编辑", "info")}
+          </div>
+          <div class="pm-card-meta">{html.escape(authors)} · 更新于 {html.escape(updated_at)}</div>
+          {section_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_card_library_page(user_id: int) -> None:
+    """Render the upgraded research knowledge-base page."""
+    try:
+        libraries = list_card_libraries(user_id)
+        all_cards = list_literature_cards(user_id=user_id)
+    except (OSError, sqlite3.Error) as exc:
+        render_app_header("文献卡片库", "沉淀论文阅读记录、方法线索、实验结论和研究灵感。")
+        render_error_card("卡片库读取失败", "请检查 SQLite 数据库权限后重试。", str(exc))
+        return
+
+    library_options = [0, *[int(library["library_id"]) for library in libraries]]
+    default_library_id = st.session_state.get("library_filter_v2", 0)
+    if default_library_id not in library_options:
+        default_library_id = 0
+    selected_library_id = st.session_state.get("library_filter_v2_select", default_library_id)
+    selected_library = (
+        next((library for library in libraries if int(library["library_id"]) == int(selected_library_id)), None)
+        if int(selected_library_id or 0) != 0
+        else None
+    )
+    current_library_name = selected_library["name"] if selected_library else "全部卡片库"
+    current_scope_count = (
+        len(all_cards)
+        if selected_library is None
+        else int(selected_library.get("card_count") or 0)
+    )
+
+    render_app_header(
+        "文献卡片库",
+        "沉淀论文阅读记录、方法线索、实验结论和研究灵感。",
+        [
+            render_status_badge(f"当前库：{current_library_name}", "primary"),
+            render_status_badge("本地保存", "success"),
+            render_status_badge("Markdown 可编辑", "info"),
+        ],
+    )
+
+    library_count = len(libraries)
+    related_pdf_count = len({card.get("paper_id") for card in all_cards if card.get("paper_id")})
+    latest_update = max((str(card.get("updated_at") or "") for card in all_cards), default="暂无")
+    week_count = _pm_recent_week_count(all_cards)
+
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        render_metric_card("卡片总数", len(all_cards), f"{library_count} 个卡片库", icon="🗂")
+    with metric_cols[1]:
+        render_metric_card("当前库卡片数", current_scope_count, current_library_name, icon="▦")
+    with metric_cols[2]:
+        render_metric_card("最近更新", latest_update or "暂无", "按更新时间统计", icon="↻")
+    with metric_cols[3]:
+        render_metric_card("关联 PDF", related_pdf_count, "按 paper_id 统计", icon="📄")
+    with metric_cols[4]:
+        render_metric_card("本周新增", week_count, "最近 7 天更新", icon="+")
+
+    st.markdown(
+        """
+        <div class="pm-library-toolbar">
+          <div class="pm-section-heading">
+            <div>
+              <h3 class="pm-section-title">知识库工具栏</h3>
+              <p class="pm-section-description">按卡片库、领域、年份和关键词快速定位研究笔记。</p>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    toolbar_top = st.columns([0.30, 0.20, 0.20, 0.15, 0.15], gap="small")
+    with toolbar_top[0]:
+        selected_library_id = st.selectbox(
+            "卡片库",
+            options=library_options,
+            index=library_options.index(int(selected_library_id or 0)) if int(selected_library_id or 0) in library_options else 0,
+            format_func=lambda library_id: "全部卡片库" if int(library_id) == 0 else library_option_label(
+                next(library for library in libraries if int(library["library_id"]) == int(library_id))
+            ),
+            key="library_filter_v2_select",
+        )
+    library_filter = None if int(selected_library_id) == 0 else int(selected_library_id)
+    selected_library = (
+        next((library for library in libraries if int(library["library_id"]) == library_filter), None)
+        if library_filter
+        else None
+    )
+    cards = list_literature_cards(user_id=user_id, library_id=library_filter)
+    current_library_name = selected_library["name"] if selected_library else "全部卡片库"
+
+    field_options = ["全部领域", *sorted({_pm_text(card.get("research_field"), "") for card in cards if card.get("research_field")})]
+    year_options = ["全部年份", *sorted({_pm_text(card.get("year"), "") for card in cards if card.get("year")}, reverse=True)]
+    with toolbar_top[1]:
+        field_filter = st.selectbox("领域 / 方法", field_options, key="library_field_filter_v2")
+    with toolbar_top[2]:
+        year_filter = st.selectbox("年份", year_options, key="library_year_filter_v2")
+    with toolbar_top[3]:
+        sort_mode = st.selectbox("排序", ["最近更新优先", "标题 A-Z", "年份新到旧"], key="library_sort_v2")
+    with toolbar_top[4]:
+        view_mode = st.radio("视图", ["网格", "紧凑"], horizontal=True, key="library_view_v2")
+
+    search_query = st.text_input(
+        "搜索",
+        placeholder="搜索标题、方法、贡献、关键词或个人笔记…",
+        key="library_search_v2",
+    )
+
+    manage_col, rename_col, batch_col = st.columns([0.32, 0.32, 0.36], gap="large")
+    with manage_col:
+        with st.expander("新建库", expanded=False):
+            render_library_create_form(user_id, key_suffix="_library_v2")
+    with rename_col:
+        if selected_library:
+            with st.expander("重命名当前库", expanded=False):
+                render_library_rename_form(user_id, selected_library)
+        else:
+            st.caption("选择具体卡片库后可重命名。")
+    with batch_col:
+        with st.expander("危险操作：批量删除", expanded=False):
+            selected_batch_ids = st.multiselect(
+                "选择要删除的文献卡片",
+                options=[int(card["card_id"]) for card in cards],
+                format_func=lambda card_id: card_option_label(
+                    next(card for card in cards if int(card["card_id"]) == int(card_id))
+                ),
+            )
+            confirm_batch_delete = st.checkbox("我确认删除选中的文献卡片，此操作不可撤销")
+            if st.button(
+                "确认批量删除",
+                disabled=not selected_batch_ids or not confirm_batch_delete,
+                use_container_width=True,
+            ):
+                try:
+                    deleted_count = delete_literature_cards(selected_batch_ids, user_id=user_id)
+                except (OSError, sqlite3.Error) as exc:
+                    render_error_card("批量删除失败", "请检查 SQLite 数据库权限。", str(exc))
+                    return
+                st.toast("批量删除完成。")
+                st.success(f"已删除 {deleted_count} 张文献卡片。")
+                st.rerun()
+
+    if field_filter != "全部领域":
+        cards = [card for card in cards if _pm_text(card.get("research_field"), "") == field_filter]
+    if year_filter != "全部年份":
+        cards = [card for card in cards if _pm_text(card.get("year"), "") == year_filter]
+    if search_query.strip():
+        needle = search_query.strip().lower()
+        cards = [
+            card
+            for card in cards
+            if needle in " ".join(
+                str(card.get(key) or "")
+                for key in (
+                    "title",
+                    "authors",
+                    "year",
+                    "research_field",
+                    "research_question",
+                    "method_summary",
+                    "datasets",
+                    "library_name",
+                    "file_name",
+                    "markdown",
+                )
+            ).lower()
+        ]
+    if sort_mode == "标题 A-Z":
+        cards = sorted(cards, key=lambda card: str(card.get("title") or ""))
+    elif sort_mode == "年份新到旧":
+        cards = sorted(cards, key=lambda card: str(card.get("year") or ""), reverse=True)
+
+    if not cards:
+        render_empty_state(
+            "还没有文献卡片",
+            "在论文工作台中生成第一张文献卡片，把阅读成果沉淀成你的研究知识库。",
+            "去论文工作台",
+            icon="🗂",
+        )
+        empty_cols = st.columns(2)
+        with empty_cols[0]:
+            if st.button("去论文工作台", type="primary", use_container_width=True):
+                st.session_state["pm_nav_page"] = "📄 论文工作台"
+                st.rerun()
+        with empty_cols[1]:
+            with st.expander("新建卡片库", expanded=False):
+                render_library_create_form(user_id, key_suffix="_empty_v2")
+        return
+
+    st.session_state["library_filter_v2"] = int(selected_library_id)
+    if "selected_literature_card_id_v2" not in st.session_state or not any(
+        int(card["card_id"]) == int(st.session_state["selected_literature_card_id_v2"]) for card in cards
+    ):
+        st.session_state["selected_literature_card_id_v2"] = int(cards[0]["card_id"])
+
+    selected_card_id = int(st.session_state["selected_literature_card_id_v2"])
+    grid_col, detail_col = st.columns([0.58, 0.42], gap="large")
+
+    with grid_col:
+        st.caption(f"「{current_library_name}」当前显示 {len(cards)} 张文献卡片。")
+        columns_per_row = 2 if view_mode == "网格" else 1
+        grid_columns = st.columns(columns_per_row)
+        for index, card in enumerate(cards):
+            card_id = int(card["card_id"])
+            with grid_columns[index % columns_per_row]:
+                render_literature_card(card, selected=card_id == selected_card_id)
+                action_cols = st.columns([0.55, 0.45])
+                with action_cols[0]:
+                    if st.button("查看详情", key=f"open_card_v2_{card_id}", use_container_width=True):
+                        st.session_state["selected_literature_card_id_v2"] = card_id
+                        st.rerun()
+                with action_cols[1]:
+                    if st.button("查看 PDF", key=f"open_pdf_v2_{card_id}", use_container_width=True):
+                        st.session_state["selected_literature_card_id_v2"] = card_id
+                        st.session_state["card_detail_tab_hint_v2"] = "pdf"
+                        st.rerun()
+
+    with detail_col:
+        selected_card = get_literature_card(selected_card_id, user_id=user_id)
+        if not selected_card:
+            render_empty_state("没有找到选中的卡片", "请重新选择一张文献卡片。", icon="🔎")
+            return
+        tab_card, tab_edit, tab_pdf = st.tabs(["详情预览", "编辑", "原 PDF"])
+        with tab_card:
+            render_literature_detail(selected_card, mode="preview")
+            with st.expander("Markdown 原文", expanded=False):
+                st.text_area(
+                    "Markdown",
+                    selected_card["markdown"],
+                    height=320,
+                    key=f"card_markdown_v2_{selected_card['card_id']}",
+                )
+        with tab_edit:
+            render_literature_detail(selected_card, mode="edit")
+            render_card_edit_form(selected_card, user_id)
+            st.divider()
+            render_card_delete(int(selected_card["card_id"]), user_id)
+        with tab_pdf:
+            render_pdf_viewer(selected_card.get("save_path"))
+
+
+def require_feedback_admin_password() -> bool:
+    """Require an administrator password before showing feedback records."""
+    admin_password = feedback_admin_password()
+    if not admin_password:
+        render_error_card(
+            "缺少管理员密码",
+            "反馈记录页需要管理员密码，请配置 PAPERMATE_ADMIN_PASSWORD 或 PAPERMATE_APP_PASSWORD。",
+        )
+        return False
+    if st.session_state.get("feedback_admin_authenticated"):
+        return True
+
+    center_cols = st.columns([0.24, 0.52, 0.24])
+    with center_cols[1]:
+        render_section_card("管理员验证", "输入管理员密码后查看用户反馈、Bad Case 和原始记录。")
+        password = st.text_input("管理员密码", type="password", key="feedback_admin_password")
+        if st.button("查看反馈记录 Dashboard", type="primary", use_container_width=True):
+            if hmac.compare_digest(password, admin_password):
+                st.session_state["feedback_admin_authenticated"] = True
+                st.rerun()
+            else:
+                render_error_card("验证失败", "管理员密码不正确。")
+    return False
+
+
+def _feedback_badge_type(feedback_type: Any, is_negative: Any = 0) -> str:
+    """Map feedback categories to badge tones."""
+    text = str(feedback_type or "")
+    if "编造" in text or "引用不支持" in text:
+        return "danger"
+    if "不准确" in text or "空泛" in text or "没有回答" in text:
+        return "warning"
+    return "danger" if int(is_negative or 0) else "success"
+
+
+def render_feedback_records_page() -> None:
+    """Render saved user feedback and bad cases as a quality dashboard."""
+    render_app_header(
+        "反馈记录",
+        "集中查看用户反馈、负面样本和 Bad Case，用于持续优化检索与回答质量。",
+        [render_status_badge("管理员", "warning"), render_status_badge("质量监控", "primary")],
+    )
+    if not require_feedback_admin_password():
+        return
+
+    feedback_rows = list_feedback_records()
+    bad_case_rows = list_bad_cases()
+    negative_count = sum(1 for row in feedback_rows if int(row.get("is_negative") or 0))
+    unsupported_count = sum(1 for row in feedback_rows if row.get("feedback_type") == "引用不支持答案")
+    hallucination_count = sum(1 for row in feedback_rows if row.get("feedback_type") == "模型编造")
+
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        render_metric_card("总反馈数", len(feedback_rows), "所有用户反馈", icon="◎")
+    with metric_cols[1]:
+        render_metric_card("负面反馈数", negative_count, "需要优先排查", icon="!", status="danger" if negative_count else "success")
+    with metric_cols[2]:
+        render_metric_card("Bad Case 数", len(bad_case_rows), "自动归档负面反馈", icon="△", status="warning" if bad_case_rows else "success")
+    with metric_cols[3]:
+        render_metric_card("引用不支持答案", unsupported_count, "引用质量风险", icon="↯", status="danger" if unsupported_count else "success")
+    with metric_cols[4]:
+        render_metric_card("模型编造", hallucination_count, "事实性风险", icon="?", status="danger" if hallucination_count else "success")
+
+    tab_overview, tab_bad_cases, tab_raw = st.tabs(["反馈总览", "Bad Case", "原始记录"])
+    with tab_overview:
+        if not feedback_rows:
+            render_empty_state("没有反馈记录", "暂无反馈。用户提交反馈后，会在这里汇总展示。", icon="🧪")
+        else:
+            overview_rows = [
+                {
+                    "反馈 ID": row.get("feedback_id"),
+                    "论文": row.get("file_name") or row.get("paper_id") or "未关联",
+                    "问题": row.get("question") or "",
+                    "回答摘要": str(row.get("answer") or "")[:160],
+                    "反馈类型": row.get("feedback_type") or "",
+                    "是否 Bad Case": "是" if int(row.get("is_negative") or 0) else "否",
+                    "提交时间": row.get("created_at"),
+                }
+                for row in feedback_rows
+            ]
+            st.dataframe(overview_rows, use_container_width=True, hide_index=True)
             for row in feedback_rows:
                 title = f"#{row['feedback_id']} · {row.get('feedback_type') or ''} · {row.get('file_name') or row.get('paper_id') or '未关联论文'}"
                 with st.expander(title):
+                    badge_type = _feedback_badge_type(row.get("feedback_type"), row.get("is_negative"))
+                    st.markdown(render_status_badge(row.get("feedback_type") or "未标注", badge_type), unsafe_allow_html=True)
                     st.write("问题：", row.get("question") or "无")
                     st.write("回答：", row.get("answer") or "无")
                     st.write("补充说明：", row.get("comment") or "无")
@@ -1907,40 +5346,1208 @@ def render_feedback_records_page() -> None:
 
     with tab_bad_cases:
         if not bad_case_rows:
-            st.info("暂无 Bad Case。")
+            render_empty_state("没有 Bad Case", "暂无 Bad Case。负面反馈会自动在这里归档。", icon="✓")
         else:
-            st.dataframe(
-                bad_case_rows,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "bad_case_id": "Bad Case ID",
-                    "paper_id": "paper_id",
-                    "file_name": "论文文件",
-                    "question": "问题",
-                    "answer": "回答",
-                    "error_type": "错误类型",
-                    "reason": "原因",
-                    "solution": "解决方案",
-                    "status": "状态",
-                    "notes": "备注",
-                    "created_at": "创建时间",
-                },
-            )
-
             for row in bad_case_rows:
                 title = f"#{row['bad_case_id']} · {row.get('error_type') or ''} · {row.get('status') or ''}"
                 with st.expander(title):
-                    st.write("问题：", row.get("question") or "无")
-                    st.write("回答：", row.get("answer") or "无")
-                    st.write("备注：", row.get("notes") or "无")
+                    st.markdown(render_status_badge(row.get("error_type") or "负面反馈", _feedback_badge_type(row.get("error_type"), 1)), unsafe_allow_html=True)
+                    st.write("用户问题：", row.get("question") or "无")
+                    st.write("模型回答：", row.get("answer") or "无")
+                    st.write("反馈原因：", row.get("reason") or row.get("notes") or "无")
+                    st.write("解决方案：", row.get("solution") or "无")
                     st.caption(f"论文：{row.get('file_name') or row.get('paper_id') or '未关联'}")
+
+    with tab_raw:
+        if not feedback_rows:
+            render_empty_state("没有原始记录", "暂无反馈。用户提交反馈后，会在这里汇总展示。", icon="🧾")
+        else:
+            st.dataframe(
+                feedback_rows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "feedback_id": "反馈 ID",
+                    "paper_id": "paper_id",
+                    "file_name": "论文文件",
+                    "qa_log_id": "问答 ID",
+                    "question": "问题",
+                    "answer": "回答",
+                    "feedback_type": "反馈类型",
+                    "is_negative": "是否负面",
+                    "comment": "补充说明",
+                    "created_at": "提交时间",
+                },
+            )
+
+
+def inject_global_css() -> None:
+    """Inject a stable, tidy PaperMate UI theme."""
+    st.markdown(
+        """
+        <style>
+        :root {
+          --pm-bg: #F8FAFC;
+          --pm-surface: rgba(255,255,255,.90);
+          --pm-surface-solid: #FFFFFF;
+          --pm-border: rgba(148,163,184,.24);
+          --pm-border-strong: rgba(100,116,139,.30);
+          --pm-text: #0F172A;
+          --pm-muted: #64748B;
+          --pm-subtle: #94A3B8;
+          --pm-primary: #4F46E5;
+          --pm-primary-2: #2563EB;
+          --pm-cyan: #0891B2;
+          --pm-success: #16A34A;
+          --pm-warning: #D97706;
+          --pm-danger: #DC2626;
+          --pm-radius: 16px;
+          --pm-radius-lg: 22px;
+          --pm-shadow: 0 10px 30px rgba(15,23,42,.07);
+          --pm-shadow-soft: 0 1px 2px rgba(15,23,42,.04);
+        }
+        html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+          color: var(--pm-text) !important;
+          background:
+            radial-gradient(circle at 12% 4%, rgba(79,70,229,.11), transparent 28%),
+            radial-gradient(circle at 90% 0%, rgba(8,145,178,.10), transparent 30%),
+            linear-gradient(135deg, #F8FAFC 0%, #F5F3FF 54%, #ECFEFF 100%) !important;
+        }
+        [data-testid="stDecoration"] { display: none; }
+        .block-container {
+          max-width: 1380px;
+          padding-top: 1.1rem;
+          padding-bottom: 3rem;
+        }
+        h1, h2, h3, h4, h5, h6 { color: var(--pm-text); letter-spacing: 0; }
+        section[data-testid="stSidebar"] {
+          background: rgba(255,255,255,.78) !important;
+          border-right: 1px solid rgba(148,163,184,.20);
+          backdrop-filter: blur(16px);
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] {
+          display: grid;
+          gap: 7px;
+          margin-top: 10px;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label {
+          border-radius: 13px;
+          border: 1px solid transparent;
+          padding: 9px 10px;
+          transition: background 120ms ease, border-color 120ms ease;
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
+          background: rgba(79,70,229,.06);
+          border-color: rgba(79,70,229,.12);
+        }
+        section[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+          background: rgba(238,242,255,.95);
+          border-color: rgba(79,70,229,.20);
+          box-shadow: inset 3px 0 0 var(--pm-primary);
+        }
+        .stButton > button,
+        .stDownloadButton > button {
+          border-radius: 12px !important;
+          border: 1px solid var(--pm-border) !important;
+          background: rgba(255,255,255,.92) !important;
+          color: var(--pm-text) !important;
+          font-weight: 700 !important;
+          min-height: 2.45rem;
+          transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+        }
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+          transform: translateY(-1px);
+          border-color: rgba(79,70,229,.32) !important;
+          box-shadow: var(--pm-shadow) !important;
+        }
+        .stButton > button[kind="primary"],
+        .stDownloadButton > button[kind="primary"],
+        button[kind="primary"] {
+          border: 0 !important;
+          color: #fff !important;
+          background: linear-gradient(135deg, var(--pm-primary), var(--pm-primary-2)) !important;
+          box-shadow: 0 10px 22px rgba(37,99,235,.18) !important;
+        }
+        div[data-testid="stTextInput"] input,
+        div[data-testid="stTextArea"] textarea,
+        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+          border-radius: 12px !important;
+          border-color: var(--pm-border) !important;
+          background: rgba(255,255,255,.94) !important;
+          color: var(--pm-text) !important;
+        }
+        div[data-testid="stTextInput"] input:focus,
+        div[data-testid="stTextArea"] textarea:focus {
+          border-color: rgba(79,70,229,.50) !important;
+          box-shadow: 0 0 0 4px rgba(79,70,229,.09) !important;
+        }
+        div[data-testid="stFileUploader"] {
+          border: 1px dashed rgba(79,70,229,.32);
+          border-radius: var(--pm-radius-lg);
+          padding: 12px;
+          background: rgba(255,255,255,.72);
+        }
+        div[data-testid="stExpander"] {
+          border: 1px solid var(--pm-border) !important;
+          border-radius: var(--pm-radius) !important;
+          background: rgba(255,255,255,.86) !important;
+          box-shadow: var(--pm-shadow-soft);
+          overflow: hidden;
+        }
+        div[data-testid="stTabs"] [role="tablist"] {
+          gap: 6px;
+          border-bottom: 1px solid var(--pm-border);
+        }
+        div[data-testid="stTabs"] [aria-selected="true"] {
+          color: var(--pm-primary) !important;
+          background: rgba(79,70,229,.08);
+          border-radius: 10px 10px 0 0;
+        }
+        .pm-panel, .pm-hero, .pm-section-card, .pm-card, .pm-auth-card,
+        .pm-empty-state, .pm-error-card, .pm-detail-panel, .pm-literature-card,
+        .pm-reference-card, .pm-chat-message {
+          border: 1px solid var(--pm-border);
+          border-radius: var(--pm-radius-lg);
+          background: var(--pm-surface);
+          box-shadow: var(--pm-shadow);
+          backdrop-filter: blur(14px);
+        }
+        .pm-hero {
+          padding: 22px 24px;
+          margin-bottom: 16px;
+        }
+        .pm-hero-top {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 18px;
+          flex-wrap: wrap;
+        }
+        .pm-hero h1 {
+          margin: 0 0 6px 0;
+          font-size: 32px;
+          line-height: 1.18;
+        }
+        .pm-hero p {
+          margin: 0;
+          color: var(--pm-muted);
+          line-height: 1.7;
+          max-width: 820px;
+        }
+        .pm-badges, .pm-toolbar, .pm-chip-row {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .pm-badge {
+          display: inline-flex;
+          align-items: center;
+          border: 1px solid var(--pm-border);
+          border-radius: 999px;
+          padding: 4px 10px;
+          background: rgba(248,250,252,.92);
+          color: #475569;
+          font-size: 12px;
+          font-weight: 800;
+          white-space: nowrap;
+        }
+        .pm-badge-primary { background: #EEF2FF; color: #4338CA; border-color: #C7D2FE; }
+        .pm-badge-info { background: #ECFEFF; color: #0E7490; border-color: #A5F3FC; }
+        .pm-badge-success { background: #F0FDF4; color: #15803D; border-color: #BBF7D0; }
+        .pm-badge-warning { background: #FFFBEB; color: #B45309; border-color: #FDE68A; }
+        .pm-badge-danger { background: #FEF2F2; color: #B91C1C; border-color: #FECACA; }
+        .pm-sidebar-brand, .pm-user-pill, .pm-sidebar-footer {
+          border: 1px solid var(--pm-border);
+          border-radius: 16px;
+          background: rgba(255,255,255,.76);
+          padding: 13px;
+          box-shadow: var(--pm-shadow-soft);
+          margin-bottom: 12px;
+        }
+        .pm-sidebar-logo {
+          width: 34px;
+          height: 34px;
+          display: inline-grid;
+          place-items: center;
+          border-radius: 11px;
+          background: linear-gradient(135deg, var(--pm-primary), var(--pm-cyan));
+          color: #fff;
+          font-weight: 850;
+          margin-bottom: 10px;
+        }
+        .pm-sidebar-brand-title { font-size: 19px; font-weight: 850; }
+        .pm-sidebar-brand-subtitle, .pm-user-pill, .pm-sidebar-footer {
+          color: var(--pm-muted);
+          font-size: 12px;
+          line-height: 1.55;
+        }
+        .pm-sidebar-section {
+          margin: 15px 0 7px;
+          color: var(--pm-subtle);
+          font-size: 11px;
+          font-weight: 850;
+          letter-spacing: .08em;
+          text-transform: uppercase;
+        }
+        .pm-auth-shell {
+          padding: 34px 0 12px;
+        }
+        .pm-auth-intro {
+          text-align: center;
+          max-width: 760px;
+          margin: 0 auto 18px;
+        }
+        .pm-auth-intro h1 {
+          margin: 0 0 8px;
+          font-size: 42px;
+          line-height: 1.12;
+        }
+        .pm-auth-intro p {
+          margin: 0 auto;
+          color: var(--pm-muted);
+          line-height: 1.7;
+          max-width: 640px;
+        }
+        .pm-auth-card {
+          max-width: 460px;
+          margin: 0 auto;
+          padding: 24px;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+          border-color: var(--pm-border) !important;
+          border-radius: var(--pm-radius-lg) !important;
+          background: rgba(255,255,255,.90) !important;
+          box-shadow: var(--pm-shadow) !important;
+        }
+        .pm-auth-title {
+          margin: 0 0 4px;
+          font-size: 24px;
+          font-weight: 850;
+        }
+        .pm-auth-subtitle {
+          margin: 0 0 18px;
+          color: var(--pm-muted);
+          line-height: 1.6;
+        }
+        .pm-privacy-note {
+          border: 1px solid rgba(22,163,74,.18);
+          border-radius: 14px;
+          padding: 11px 12px;
+          background: rgba(240,253,244,.76);
+          color: #166534;
+          font-size: 13px;
+          line-height: 1.55;
+          margin-top: 14px;
+        }
+        .pm-section-card, .pm-panel {
+          padding: 17px;
+          margin-bottom: 14px;
+        }
+        .pm-section-title {
+          margin: 0;
+          color: var(--pm-text);
+          font-size: 18px;
+          font-weight: 850;
+        }
+        .pm-section-description {
+          margin: 5px 0 0;
+          color: var(--pm-muted);
+          font-size: 13px;
+          line-height: 1.6;
+        }
+        .pm-metric-card {
+          min-height: 96px;
+          border: 1px solid var(--pm-border);
+          border-radius: 16px;
+          background: rgba(255,255,255,.86);
+          padding: 14px;
+          box-shadow: var(--pm-shadow-soft);
+        }
+        .pm-metric-label { color: var(--pm-muted); font-size: 12px; font-weight: 850; margin-bottom: 6px; }
+        .pm-metric-value { color: var(--pm-text); font-size: 18px; font-weight: 850; line-height: 1.25; word-break: break-word; }
+        .pm-metric-helper { color: var(--pm-muted); font-size: 12px; line-height: 1.35; margin-top: 7px; }
+        .pm-metric-icon {
+          width: 28px;
+          height: 28px;
+          display: inline-grid;
+          place-items: center;
+          border-radius: 10px;
+          background: #EEF2FF;
+          color: var(--pm-primary);
+          margin-bottom: 8px;
+        }
+        .pm-workflow {
+          display: grid;
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+          gap: 10px;
+          margin: 2px 0 15px;
+        }
+        .pm-step {
+          display: flex;
+          align-items: center;
+          gap: 9px;
+          border: 1px solid var(--pm-border);
+          border-radius: 15px;
+          background: rgba(255,255,255,.82);
+          padding: 10px;
+        }
+        .pm-step-dot {
+          width: 25px;
+          height: 25px;
+          border-radius: 999px;
+          display: inline-grid;
+          place-items: center;
+          background: #E2E8F0;
+          color: #64748B;
+          font-size: 12px;
+          font-weight: 850;
+          flex: 0 0 auto;
+        }
+        .pm-step-title { color: var(--pm-text); font-size: 13px; font-weight: 850; }
+        .pm-step-helper { color: var(--pm-subtle); font-size: 11px; margin-top: 2px; }
+        .pm-step-done .pm-step-dot { background: #DCFCE7; color: var(--pm-success); }
+        .pm-step-active { background: #EEF2FF; border-color: #C7D2FE; }
+        .pm-step-active .pm-step-dot { background: var(--pm-primary); color: #fff; }
+        .pm-step-error { background: #FEF2F2; border-color: #FECACA; }
+        .pm-step-error .pm-step-dot { background: var(--pm-danger); color: #fff; }
+        .pm-file-capsule {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 12px;
+          border: 1px solid var(--pm-border);
+          border-radius: 16px;
+          background: rgba(255,255,255,.82);
+          padding: 12px 14px;
+          margin: 8px 0 12px;
+        }
+        .pm-small, .pm-card-meta {
+          color: var(--pm-muted);
+          font-size: 12px;
+          line-height: 1.5;
+        }
+        .pm-reader-note {
+          border: 1px solid var(--pm-border);
+          border-radius: var(--pm-radius-lg);
+          background: rgba(255,255,255,.92);
+          padding: 18px;
+          margin-bottom: 16px;
+          box-shadow: var(--pm-shadow);
+        }
+        .pm-reader-note p, .pm-reader-note li { line-height: 1.76; color: #1E293B; }
+        .pm-chat-message {
+          padding: 13px 14px;
+          margin: 10px 0;
+          line-height: 1.72;
+        }
+        .pm-chat-user { background: #EEF2FF; margin-left: 6%; }
+        .pm-chat-assistant { background: rgba(255,255,255,.92); margin-right: 3%; }
+        .pm-chat-role { color: var(--pm-muted); font-size: 12px; font-weight: 850; margin-bottom: 4px; }
+        .pm-reference-card {
+          padding: 14px;
+          margin: 10px 0;
+          background: rgba(255,255,255,.92);
+        }
+        .pm-reference-head {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          flex-wrap: wrap;
+          margin-bottom: 10px;
+        }
+        .pm-reference-title { color: #1D4ED8; font-weight: 850; }
+        .pm-reference-text {
+          border-left: 3px solid rgba(37,99,235,.34);
+          border-radius: 12px;
+          background: #F8FAFC;
+          padding: 11px 12px;
+          color: #1E293B;
+          line-height: 1.7;
+          white-space: pre-wrap;
+        }
+        .pm-reference-meta {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 8px;
+          margin-top: 10px;
+        }
+        .pm-reference-meta-item {
+          border: 1px solid rgba(148,163,184,.18);
+          border-radius: 10px;
+          background: #F8FAFC;
+          padding: 8px;
+          color: var(--pm-muted);
+          font-size: 11px;
+        }
+        .pm-reference-meta-item strong {
+          display: block;
+          color: var(--pm-text);
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          font-size: 12px;
+          margin-top: 2px;
+          word-break: break-word;
+        }
+        .pm-source-link {
+          display: inline-flex;
+          border: 1px solid #BFDBFE;
+          border-radius: 999px;
+          padding: 3px 10px;
+          background: #EFF6FF;
+          color: #1D4ED8;
+          font-size: 12px;
+          font-weight: 800;
+          text-decoration: none;
+          margin-top: 4px;
+        }
+        .pm-source-anchor { display: block; scroll-margin-top: 18px; height: 1px; }
+        .pm-literature-card {
+          padding: 15px;
+          margin-bottom: 12px;
+          background: rgba(255,255,255,.92);
+          transition: border-color 120ms ease, box-shadow 120ms ease;
+        }
+        .pm-literature-card-selected {
+          border-color: rgba(79,70,229,.48);
+          box-shadow: 0 0 0 4px rgba(79,70,229,.08), var(--pm-shadow);
+        }
+        .pm-card-title {
+          color: var(--pm-text);
+          font-size: 17px;
+          font-weight: 850;
+          line-height: 1.38;
+          margin-bottom: 7px;
+        }
+        .pm-chip {
+          display: inline-flex;
+          border: 1px solid rgba(148,163,184,.22);
+          border-radius: 999px;
+          padding: 3px 9px;
+          background: #F8FAFC;
+          color: #475569;
+          font-size: 11px;
+          font-weight: 750;
+        }
+        .pm-card-summary {
+          border: 1px solid rgba(148,163,184,.16);
+          border-radius: 13px;
+          background: #F8FAFC;
+          padding: 10px 11px;
+          color: #334155;
+          font-size: 13px;
+          line-height: 1.62;
+          margin-top: 10px;
+        }
+        .pm-card-footer {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          align-items: center;
+          border-top: 1px solid rgba(148,163,184,.15);
+          padding-top: 10px;
+          margin-top: 10px;
+          color: var(--pm-subtle);
+          font-size: 11px;
+        }
+        .pm-detail-panel {
+          padding: 17px;
+          margin-bottom: 14px;
+          background: rgba(255,255,255,.92);
+        }
+        .pm-detail-title {
+          margin: 0 0 8px;
+          color: var(--pm-text);
+          font-size: 22px;
+          line-height: 1.3;
+          font-weight: 900;
+        }
+        .pm-detail-section {
+          border: 1px solid rgba(148,163,184,.16);
+          border-radius: 13px;
+          background: #F8FAFC;
+          padding: 11px 12px;
+          margin-top: 9px;
+        }
+        .pm-detail-section strong {
+          display: block;
+          color: var(--pm-primary);
+          font-size: 12px;
+          margin-bottom: 4px;
+        }
+        .pm-detail-section div {
+          color: #1E293B;
+          line-height: 1.65;
+          white-space: pre-wrap;
+        }
+        .pm-empty-state {
+          text-align: center;
+          padding: 28px 22px;
+          margin: 14px 0;
+          background: rgba(255,255,255,.86);
+        }
+        .pm-empty-icon {
+          width: 44px;
+          height: 44px;
+          display: grid;
+          place-items: center;
+          border-radius: 16px;
+          background: #EEF2FF;
+          color: var(--pm-primary);
+          margin: 0 auto 10px;
+          font-size: 20px;
+        }
+        .pm-empty-title { color: var(--pm-text); font-size: 18px; font-weight: 850; margin-bottom: 6px; }
+        .pm-empty-description { color: var(--pm-muted); line-height: 1.65; max-width: 620px; margin: 0 auto; }
+        .pm-empty-action {
+          display: inline-flex;
+          margin-top: 13px;
+          border-radius: 999px;
+          padding: 6px 12px;
+          background: #EEF2FF;
+          color: var(--pm-primary);
+          font-size: 12px;
+          font-weight: 850;
+        }
+        .pm-error-card {
+          padding: 15px;
+          margin: 12px 0;
+          background: #FFFBFB;
+          border-color: #FECACA;
+        }
+        .pm-error-card .pm-section-title { color: #B91C1C; }
+        @media (max-width: 980px) {
+          .pm-workflow, .pm-reference-meta { grid-template-columns: 1fr; }
+          .pm-auth-intro h1 { font-size: 34px; }
+          .pm-chat-user, .pm-chat-assistant { margin-left: 0; margin-right: 0; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_app_header(
+    title: str,
+    subtitle: str,
+    status_badges: list[str] | None = None,
+) -> None:
+    badges = "".join(status_badges or [])
+    st.markdown(
+        f"""
+        <div class="pm-hero">
+          <div class="pm-hero-top">
+            <div>
+              <h1>{html.escape(title)}</h1>
+              <p>{html.escape(subtitle)}</p>
+            </div>
+            <div class="pm-badges">{badges}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric_card(
+    label: str,
+    value: Any,
+    helper: str | None = None,
+    icon: str | None = None,
+    status: str | None = None,
+) -> None:
+    status_name = "danger" if status == "error" else str(status or "")
+    icon_html = f'<div class="pm-metric-icon">{html.escape(str(icon))}</div>' if icon else ""
+    helper_html = f'<div class="pm-metric-helper">{html.escape(helper)}</div>' if helper else ""
+    st.markdown(
+        f"""
+        <div class="pm-metric-card pm-metric-card-{html.escape(status_name)}">
+          {icon_html}
+          <div class="pm-metric-label">{html.escape(label)}</div>
+          <div class="pm-metric-value">{html.escape(str(value))}</div>
+          {helper_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_section_card(title: str, description: str | None = None) -> None:
+    description_html = f'<p class="pm-section-description">{html.escape(description)}</p>' if description else ""
+    st.markdown(
+        f"""
+        <div class="pm-section-card">
+          <h3 class="pm-section-title">{html.escape(title)}</h3>
+          {description_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_auth_page() -> None:
+    """Render a simple centered login/register page."""
+    st.markdown(
+        f"""
+        <div class="pm-auth-shell">
+          <div>
+            <div class="pm-auth-intro">
+              <div class="pm-badges" style="justify-content:center;margin-bottom:14px;">
+                {render_status_badge("本地运行", "success")}
+                {render_status_badge("数据私有", "primary")}
+                {render_status_badge("可信引用", "info")}
+              </div>
+              <h1>PaperMate</h1>
+              <p>本地运行的论文阅读 RAG 助手。上传 PDF，解析正文，基于原文引用问答，并沉淀文献卡片。</p>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    left, middle, right = st.columns([1, 0.92, 1])
+    with middle:
+        with st.container(border=True):
+            st.markdown(
+                """
+                <h2 class="pm-auth-title">欢迎回来</h2>
+                <p class="pm-auth-subtitle">继续你的论文阅读与研究整理。</p>
+                """,
+                unsafe_allow_html=True,
+            )
+            login_tab, register_tab = st.tabs(["登录", "注册"])
+            with login_tab:
+                with st.form("login_form_tidy"):
+                    username = st.text_input("用户名", key="login_username", placeholder="输入用户名")
+                    password = st.text_input("密码", type="password", key="login_password", placeholder="输入密码")
+                    submitted = st.form_submit_button("登录 PaperMate", type="primary", use_container_width=True)
+                if submitted:
+                    user = authenticate_user(username, password)
+                    if not user:
+                        render_error_card("登录失败", "请检查用户名或密码后再试。")
+                    else:
+                        prepare_user_workspace(int(user["user_id"]))
+                        set_current_user(user)
+                        st.toast("登录成功。")
+                        st.rerun()
+            with register_tab:
+                with st.form("register_form_tidy"):
+                    username = st.text_input("用户名", key="register_username", placeholder="3-32 位用户名")
+                    password = st.text_input("密码", type="password", key="register_password", placeholder="至少 6 位")
+                    password_confirm = st.text_input("确认密码", type="password", key="register_password_confirm")
+                    submitted = st.form_submit_button("创建账户", type="primary", use_container_width=True)
+                if submitted:
+                    if password != password_confirm:
+                        render_error_card("注册失败", "两次输入的密码不一致。")
+                    else:
+                        try:
+                            user = create_user(username, password)
+                            prepare_user_workspace(int(user["user_id"]))
+                        except (ValueError, OSError, sqlite3.Error) as exc:
+                            render_error_card("注册失败", str(exc) or "注册失败，请稍后再试。")
+                        else:
+                            set_current_user(user)
+                            st.toast("账户已创建。")
+                            st.rerun()
+            render_privacy_note()
+
+
+def render_processed_pdf_summary(processed_pdf: dict[str, Any]) -> None:
+    saved_file = processed_pdf["saved_file"]
+    parsed_pdf = processed_pdf["parsed_pdf"]
+    st.markdown(
+        f"""
+        <div class="pm-panel">
+          <h3 class="pm-section-title">论文已解析</h3>
+          <p class="pm-section-description">文件已保存到本地，并转换为可阅读、可检索的 Markdown。</p>
+          <div class="pm-file-capsule">
+            <div>
+              <strong>{html.escape(saved_file["file_name"])}</strong>
+              <div class="pm-card-meta">{html.escape(saved_file["file_size"])} · paper_id: {html.escape(saved_file["paper_id"])}</div>
+            </div>
+            <div class="pm-badges">
+              {render_status_badge(f"页数 {parsed_pdf.get('page_count', 0)}", "info")}
+              {render_status_badge(f"图片 {len(parsed_pdf.get('images', []))} 张", "primary")}
+              {render_status_badge(f"字符 {processed_pdf.get('total_chars', 0)}", "default")}
+            </div>
+          </div>
+          <div class="pm-card-meta">本地路径：{html.escape(saved_file["save_path"])}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    markdown_path = Path(parsed_pdf.get("markdown_path") or "")
+    if parsed_pdf.get("markdown_path") and markdown_path.exists():
+        st.download_button(
+            "下载完整 Markdown",
+            data=markdown_path.read_bytes(),
+            file_name="full.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+    render_extracted_images(parsed_pdf.get("images", []))
+
+
+def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
+    parsed_pdf = processed_pdf["parsed_pdf"]
+    markdown = parsed_pdf.get("markdown", "") or processed_pdf["preview"]
+    safe_markdown = markdown_for_display(markdown, parsed_pdf.get("images", []))
+    paper_header, body_markdown = split_paper_header(safe_markdown)
+    anchored_body, _missing_chunks = add_chunk_anchors_to_markdown(
+        body_markdown or safe_markdown,
+        processed_pdf.get("chunks", []),
+    )
+    st.markdown(
+        f"""
+        <div class="pm-panel">
+          <h3 class="pm-section-title">论文正文</h3>
+          <p class="pm-section-description">适合长时间阅读的 Markdown 视图，引用片段可从问答区跳回原文。</p>
+          <div class="pm-toolbar" style="margin-top:12px;">
+            {render_status_badge(f"解析方式 {parsed_pdf.get('parser', '未知')}", "primary")}
+            {render_status_badge(f"页数 {parsed_pdf.get('page_count', 0)}", "info")}
+            {render_status_badge(f"图片 {len(parsed_pdf.get('images', []))} 张", "default")}
+            {render_status_badge(f"Chunks {len(processed_pdf.get('chunks', []))}", "success")}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if paper_header:
+        st.caption(f"标题：{paper_header.get('title') or '未识别'}")
+        st.caption(f"作者：{paper_header.get('authors') or '未识别'}")
+    st.markdown(anchored_body or "暂无 Markdown 内容", unsafe_allow_html=True)
+
+
+def render_workspace_page() -> None:
+    """Render a tidy paper workspace page."""
+    processed_pdf: dict[str, Any] | None = st.session_state.get("processed_pdf")
+    paper_id = str((processed_pdf or {}).get("saved_file", {}).get("paper_id") or "")
+    index_state = local_index_state(paper_id) if paper_id else {"vector": "未知", "bm25": "未知"}
+    index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
+    qa_done = bool(paper_id and st.session_state.get(f"last_qa_{paper_id}"))
+    card_done = bool(paper_id and st.session_state.get(f"saved_card_id_{paper_id}"))
+
+    render_app_header(
+        "论文工作台",
+        "上传 PDF，解析正文，构建 Hybrid RAG 索引，并基于可信引用追问论文。",
+        [
+            render_status_badge("本地运行", "success"),
+            render_status_badge("可信引用", "info"),
+            render_status_badge("知识沉淀", "primary"),
+        ],
+    )
+    render_workflow_steps(
+        [
+            {"title": "上传 PDF", "helper": "选择论文文件", "status": "done" if processed_pdf else "active"},
+            {"title": "解析正文", "helper": "Markdown 与图片", "status": "done" if processed_pdf else "pending"},
+            {"title": "构建索引", "helper": "Chroma + BM25", "status": "done" if index_ready else ("active" if processed_pdf else "pending")},
+            {"title": "开始问答", "helper": "基于原文引用", "status": "done" if qa_done else ("active" if index_ready else "pending")},
+            {"title": "生成卡片", "helper": "沉淀研究笔记", "status": "done" if card_done else ("active" if qa_done else "pending")},
+        ]
+    )
+
+    saved_file = processed_pdf.get("saved_file", {}) if processed_pdf else {}
+    chunks = processed_pdf.get("chunks", []) if processed_pdf else []
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        render_metric_card("当前论文", saved_file.get("file_name") or "未上传", "上传 PDF 后开始解析", icon="PDF")
+    with metric_cols[1]:
+        render_metric_card("解析状态", "已完成" if processed_pdf else "未开始", "正文、图片与页码", icon="MD", status="success" if processed_pdf else "warning")
+    with metric_cols[2]:
+        render_metric_card("Chunk 数量", len(chunks), "用于检索的论文片段", icon="CH")
+    with metric_cols[3]:
+        render_metric_card("向量索引", index_state["vector"], "Chroma 语义检索", icon="V", status=index_status_type(index_state["vector"]))
+    with metric_cols[4]:
+        render_metric_card("BM25 状态", index_state["bm25"], "关键词精确检索", icon="B", status=index_status_type(index_state["bm25"]))
+
+    render_section_card("上传与解析", "拖拽或选择一篇 PDF。解析完成后可下载 Markdown 和图片，并继续构建检索索引。")
+    uploaded_file = st.file_uploader("选择一篇 PDF 论文", type=["pdf"], accept_multiple_files=False)
+
+    if uploaded_file is None:
+        if not processed_pdf:
+            render_empty_state(
+                "还没有论文",
+                "上传一篇 PDF，PaperMate 会帮你解析正文、构建索引并开始问答。",
+                "选择 PDF 文件",
+                icon="PDF",
+            )
+            return
+        st.info("已恢复当前会话中的论文工作台内容。需要换论文时，重新上传 PDF 即可。")
+    else:
+        signature = get_uploaded_file_signature(uploaded_file)
+        cached_pdf = processed_pdf if processed_pdf and processed_pdf.get("signature") == signature else None
+        st.markdown(
+            f"""
+            <div class="pm-file-capsule">
+              <div>
+                <strong>{html.escape(uploaded_file.name)}</strong>
+                <div class="pm-card-meta">{format_file_size(len(uploaded_file.getvalue()))} · 已选择，等待本地解析</div>
+              </div>
+              <div class="pm-badges">{render_status_badge("PDF", "primary")}{render_status_badge("本地保存", "success")}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if cached_pdf:
+            processed_pdf = cached_pdf
+            if st.button("重新解析当前 PDF", use_container_width=True):
+                st.session_state.pop("processed_pdf", None)
+                st.rerun()
+        else:
+            processed_pdf = None
+            if st.button("开始解析 PDF", type="primary", use_container_width=True, key="start_pdf_parse"):
+                try:
+                    with st.spinner("正在保存 PDF 并转换为 Markdown..."):
+                        processed_pdf = process_uploaded_pdf(uploaded_file)
+                except (UploadError, PdfParseError, MinerUError) as exc:
+                    logger.exception("PDF upload or parse failed.")
+                    render_error_card(
+                        "PDF 解析失败",
+                        f"{exc.message} 请检查文件、解析服务配置或网络连接后重试。",
+                        f"错误码：{exc.code.value}",
+                    )
+                    processed_pdf = None
+
+    if not processed_pdf:
+        return
+    if processed_pdf["db_save_failed"]:
+        render_error_card("数据保存失败", "解析结果可以继续查看，但 RAG 和文献卡片可能无法使用。请检查 SQLite 数据库权限。")
+
+    render_processed_pdf_summary(processed_pdf)
+    render_index_builder(processed_pdf["chunks"])
+
+    st.divider()
+    reader_tab, ask_tab, card_tab = st.tabs(["论文正文", "Ask PaperMate", "文献卡片"])
+    with reader_tab:
+        render_markdown_document(processed_pdf)
+    with ask_tab:
+        render_qa_box(processed_pdf["saved_file"]["paper_id"])
+    with card_tab:
+        render_literature_card_save(
+            processed_pdf["saved_file"]["paper_id"],
+            processed_pdf["chunks"],
+            processed_pdf["db_save_failed"],
+            current_user_id(),
+        )
+
+
+def render_literature_card(card: dict[str, Any], selected: bool = False) -> None:
+    title = _pm_text(card.get("title"), "未命名论文")
+    authors = _pm_text(card.get("authors"), "作者未识别")
+    year = _pm_text(card.get("year"), "年份未知")
+    library_name = _pm_text(card.get("library_name"), "未分组")
+    question = _pm_compact(card.get("research_question"), 150)
+    method = _pm_compact(card.get("method_summary"), 135)
+    updated_at = _pm_text(card.get("updated_at"), "暂无更新时间")
+    chips = "".join(f'<span class="pm-chip">{html.escape(chip)}</span>' for chip in _pm_method_chips(card, limit=3))
+    selected_class = " pm-literature-card-selected" if selected else ""
+    st.markdown(
+        f"""
+        <div class="pm-literature-card{selected_class}">
+          <div class="pm-card-title">{html.escape(title)}</div>
+          <div class="pm-card-meta">{html.escape(authors)} · {html.escape(year)}</div>
+          <div class="pm-chip-row">{chips}</div>
+          <div class="pm-card-summary"><strong>研究问题</strong><br>{html.escape(question)}</div>
+          <div class="pm-card-summary"><strong>核心方法</strong><br>{html.escape(method)}</div>
+          <div class="pm-card-footer">
+            <span>{html.escape(library_name)}</span>
+            <span>{html.escape(updated_at)}</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_literature_detail(card: dict[str, Any], mode: str = "preview") -> None:
+    markdown = str(card.get("markdown") or "")
+    title = _pm_text(card.get("title"), "未命名论文")
+    authors = _pm_text(card.get("authors"), "作者未识别")
+    year = _pm_text(card.get("year"), "年份未知")
+    library_name = _pm_text(card.get("library_name"), "未分组")
+    updated_at = _pm_text(card.get("updated_at"), "暂无更新时间")
+    editing_badge = render_status_badge("正在编辑", "warning") if mode == "edit" else ""
+    sections = [
+        ("研究问题", card.get("research_question")),
+        ("核心方法", card.get("method_summary")),
+        ("主要贡献", _pm_markdown_section(markdown, ("主要贡献", "贡献摘要", "论文贡献"))),
+        ("实验结论", card.get("datasets")),
+        ("局限性", _pm_markdown_section(markdown, ("局限性", "局限", "不足"))),
+        ("我的笔记", _pm_markdown_section(markdown, ("我的笔记", "个人笔记", "复习线索"))),
+    ]
+    section_html = "".join(
+        f"""
+        <div class="pm-detail-section">
+          <strong>{html.escape(label)}</strong>
+          <div>{html.escape(_pm_text(value, "原文未明确说明"))}</div>
+        </div>
+        """
+        for label, value in sections
+    )
+    st.markdown(
+        f"""
+        <div class="pm-detail-panel">
+          <h2 class="pm-detail-title">{html.escape(title)}</h2>
+          <div class="pm-badges" style="margin-bottom:10px;">
+            {render_status_badge(year, "primary")}
+            {render_status_badge(library_name, "default")}
+            {render_status_badge("Markdown 可编辑", "info")}
+            {editing_badge}
+          </div>
+          <div class="pm-card-meta">{html.escape(authors)} · 更新于 {html.escape(updated_at)}</div>
+          {section_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_card_visual(card: dict[str, Any]) -> None:
+    render_literature_card(card)
+
+
+def render_card_library_page(user_id: int) -> None:
+    """Render a tidy literature-card knowledge base."""
+    render_app_header(
+        "文献卡片库",
+        "沉淀论文阅读记录、方法线索、实验结论和研究灵感。",
+        [
+            render_status_badge("本地保存", "success"),
+            render_status_badge("Markdown 可编辑", "info"),
+        ],
+    )
+    try:
+        libraries = list_card_libraries(user_id)
+        all_cards = list_literature_cards(user_id=user_id)
+    except (OSError, sqlite3.Error) as exc:
+        render_error_card("卡片库读取失败", "请检查 SQLite 数据库权限后重试。", str(exc))
+        return
+
+    library_options = [0, *[int(library["library_id"]) for library in libraries]]
+    selected_library_id = st.session_state.get("library_filter_tidy", 0)
+    if int(selected_library_id) not in library_options:
+        selected_library_id = 0
+    selected_library = (
+        next((library for library in libraries if int(library["library_id"]) == int(selected_library_id)), None)
+        if int(selected_library_id) != 0
+        else None
+    )
+    current_library_name = selected_library["name"] if selected_library else "全部卡片库"
+    library_filter = None if int(selected_library_id) == 0 else int(selected_library_id)
+    cards = list_literature_cards(user_id=user_id, library_id=library_filter)
+
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        render_metric_card("卡片总数", len(all_cards), f"{len(libraries)} 个卡片库", icon="C")
+    with metric_cols[1]:
+        render_metric_card("当前库卡片数", len(cards), current_library_name, icon="L")
+    with metric_cols[2]:
+        render_metric_card("最近更新", max((str(card.get("updated_at") or "") for card in all_cards), default="暂无"), "按更新时间统计", icon="U")
+    with metric_cols[3]:
+        render_metric_card("关联 PDF", len({card.get("paper_id") for card in all_cards if card.get("paper_id")}), "按 paper_id 统计", icon="P")
+    with metric_cols[4]:
+        render_metric_card("本周新增", _pm_recent_week_count(all_cards), "最近 7 天更新", icon="+")
+
+    render_section_card("筛选与管理", "先选择卡片库和筛选条件，再在左侧选择卡片，右侧查看详情。")
+    top_cols = st.columns([0.28, 0.24, 0.18, 0.18, 0.12], gap="small")
+    with top_cols[0]:
+        selected_library_id = st.selectbox(
+            "卡片库",
+            options=library_options,
+            index=library_options.index(int(selected_library_id)),
+            format_func=lambda library_id: "全部卡片库" if int(library_id) == 0 else library_option_label(
+                next(library for library in libraries if int(library["library_id"]) == int(library_id))
+            ),
+            key="library_filter_tidy",
+        )
+    library_filter = None if int(selected_library_id) == 0 else int(selected_library_id)
+    cards = list_literature_cards(user_id=user_id, library_id=library_filter)
+    field_options = ["全部领域", *sorted({_pm_text(card.get("research_field"), "") for card in cards if card.get("research_field")})]
+    year_options = ["全部年份", *sorted({_pm_text(card.get("year"), "") for card in cards if card.get("year")}, reverse=True)]
+    with top_cols[1]:
+        search_query = st.text_input("搜索", placeholder="标题、方法、贡献、关键词")
+    with top_cols[2]:
+        field_filter = st.selectbox("领域", field_options)
+    with top_cols[3]:
+        year_filter = st.selectbox("年份", year_options)
+    with top_cols[4]:
+        sort_mode = st.selectbox("排序", ["最近", "标题", "年份"])
+
+    action_cols = st.columns([0.34, 0.34, 0.32], gap="large")
+    with action_cols[0]:
+        with st.expander("新建卡片库", expanded=False):
+            render_library_create_form(user_id, key_suffix="_tidy")
+    with action_cols[1]:
+        selected_library = (
+            next((library for library in libraries if int(library["library_id"]) == int(selected_library_id)), None)
+            if int(selected_library_id) != 0
+            else None
+        )
+        if selected_library:
+            with st.expander("重命名当前库", expanded=False):
+                render_library_rename_form(user_id, selected_library)
+        else:
+            st.caption("选择具体卡片库后可重命名。")
+    with action_cols[2]:
+        with st.expander("批量删除", expanded=False):
+            selected_batch_ids = st.multiselect(
+                "选择要删除的卡片",
+                options=[int(card["card_id"]) for card in cards],
+                format_func=lambda card_id: card_option_label(
+                    next(card for card in cards if int(card["card_id"]) == int(card_id))
+                ),
+            )
+            confirm_batch_delete = st.checkbox("确认删除，操作不可撤销")
+            if st.button("确认批量删除", disabled=not selected_batch_ids or not confirm_batch_delete, use_container_width=True):
+                try:
+                    deleted_count = delete_literature_cards(selected_batch_ids, user_id=user_id)
+                except (OSError, sqlite3.Error) as exc:
+                    render_error_card("批量删除失败", "请检查 SQLite 数据库权限。", str(exc))
+                    return
+                st.success(f"已删除 {deleted_count} 张文献卡片。")
+                st.rerun()
+
+    if field_filter != "全部领域":
+        cards = [card for card in cards if _pm_text(card.get("research_field"), "") == field_filter]
+    if year_filter != "全部年份":
+        cards = [card for card in cards if _pm_text(card.get("year"), "") == year_filter]
+    if search_query.strip():
+        needle = search_query.strip().lower()
+        cards = [
+            card for card in cards
+            if needle in " ".join(str(card.get(key) or "") for key in (
+                "title", "authors", "year", "research_field", "research_question",
+                "method_summary", "datasets", "library_name", "file_name", "markdown"
+            )).lower()
+        ]
+    if sort_mode == "标题":
+        cards = sorted(cards, key=lambda card: str(card.get("title") or ""))
+    elif sort_mode == "年份":
+        cards = sorted(cards, key=lambda card: str(card.get("year") or ""), reverse=True)
+
+    if not cards:
+        render_empty_state(
+            "还没有文献卡片",
+            "在论文工作台中生成第一张文献卡片，把阅读成果沉淀成你的研究知识库。",
+            "去论文工作台",
+            icon="CARD",
+        )
+        if st.button("去论文工作台", type="primary", use_container_width=True):
+            st.session_state["pm_nav_page"] = "📄 论文工作台"
+            st.rerun()
+        return
+
+    if "selected_literature_card_id_tidy" not in st.session_state or not any(
+        int(card["card_id"]) == int(st.session_state["selected_literature_card_id_tidy"]) for card in cards
+    ):
+        st.session_state["selected_literature_card_id_tidy"] = int(cards[0]["card_id"])
+
+    selected_card_id = st.selectbox(
+        "当前查看的文献卡片",
+        options=[int(card["card_id"]) for card in cards],
+        index=[int(card["card_id"]) for card in cards].index(int(st.session_state["selected_literature_card_id_tidy"])),
+        format_func=lambda card_id: card_option_label(next(card for card in cards if int(card["card_id"]) == int(card_id))),
+    )
+    st.session_state["selected_literature_card_id_tidy"] = int(selected_card_id)
+
+    list_col, detail_col = st.columns([0.42, 0.58], gap="large")
+    with list_col:
+        st.caption(f"当前显示 {len(cards)} 张卡片")
+        for card in cards:
+            render_literature_card(card, selected=int(card["card_id"]) == int(selected_card_id))
+    with detail_col:
+        selected_card = get_literature_card(int(selected_card_id), user_id=user_id)
+        if not selected_card:
+            render_empty_state("没有找到选中的卡片", "请重新选择一张文献卡片。", icon="CARD")
+            return
+        tab_card, tab_edit, tab_pdf = st.tabs(["详情", "编辑", "原 PDF"])
+        with tab_card:
+            render_literature_detail(selected_card, mode="preview")
+            with st.expander("Markdown 原文", expanded=False):
+                st.text_area("Markdown", selected_card["markdown"], height=320, key=f"card_markdown_tidy_{selected_card['card_id']}")
+        with tab_edit:
+            render_literature_detail(selected_card, mode="edit")
+            render_card_edit_form(selected_card, user_id)
+            st.divider()
+            render_card_delete(int(selected_card["card_id"]), user_id)
+        with tab_pdf:
+            render_pdf_viewer(selected_card.get("save_path"))
+
+
+def render_workflow_steps(steps: list[dict[str, str]]) -> None:
+    """Render workflow steps without Markdown treating HTML as code."""
+    items: list[str] = []
+    for index, step in enumerate(steps, start=1):
+        status = html.escape(str(step.get("status") or "pending"))
+        title = html.escape(str(step.get("title") or ""))
+        helper = html.escape(str(step.get("helper") or ""))
+        items.append(
+            '<div class="pm-step pm-step-{status}">'
+            '<div class="pm-step-dot">{index}</div>'
+            '<div><div class="pm-step-title">{title}</div>'
+            '<div class="pm-step-helper">{helper}</div></div>'
+            '</div>'.format(status=status, index=index, title=title, helper=helper)
+        )
+    st.markdown(
+        '<div class="pm-workflow">{items}</div>'.format(items="".join(items)),
+        unsafe_allow_html=True,
+    )
+
+
+def render_literature_detail(card: dict[str, Any], mode: str = "preview") -> None:
+    """Render literature-card detail without exposing raw HTML."""
+    markdown = str(card.get("markdown") or "")
+    title = _pm_text(card.get("title"), "未命名论文")
+    authors = _pm_text(card.get("authors"), "作者未识别")
+    year = _pm_text(card.get("year"), "年份未知")
+    library_name = _pm_text(card.get("library_name"), "未分组")
+    updated_at = _pm_text(card.get("updated_at"), "暂无更新时间")
+    editing_badge = render_status_badge("正在编辑", "warning") if mode == "edit" else ""
+    sections = [
+        ("研究问题", card.get("research_question")),
+        ("核心方法", card.get("method_summary")),
+        ("主要贡献", _pm_markdown_section(markdown, ("主要贡献", "贡献摘要", "论文贡献"))),
+        ("实验结论", card.get("datasets")),
+        ("局限性", _pm_markdown_section(markdown, ("局限性", "局限", "不足"))),
+        ("我的笔记", _pm_markdown_section(markdown, ("我的笔记", "个人笔记", "复习线索"))),
+    ]
+    section_html = "".join(
+        '<div class="pm-detail-section"><strong>{label}</strong><div>{value}</div></div>'.format(
+            label=html.escape(label),
+            value=html.escape(_pm_text(value, "原文未明确说明")),
+        )
+        for label, value in sections
+    )
+    badges = "".join(
+        [
+            render_status_badge(year, "primary"),
+            render_status_badge(library_name, "default"),
+            render_status_badge("Markdown 可编辑", "info"),
+            editing_badge,
+        ]
+    )
+    detail_html = (
+        '<div class="pm-detail-panel">'
+        '<h2 class="pm-detail-title">{title}</h2>'
+        '<div class="pm-badges" style="margin-bottom:10px;">{badges}</div>'
+        '<div class="pm-card-meta">{authors} · 更新于 {updated_at}</div>'
+        '{sections}'
+        '</div>'
+    ).format(
+        title=html.escape(title),
+        badges=badges,
+        authors=html.escape(authors),
+        updated_at=html.escape(updated_at),
+        sections=section_html,
+    )
+    st.markdown(detail_html, unsafe_allow_html=True)
 
 
 def render_app() -> None:
     """Render the PaperMate app."""
     st.set_page_config(page_title=settings.app_name, layout="wide", initial_sidebar_state="expanded")
-    inject_styles()
+    inject_global_css()
+    render_app_shell()
 
     init_db()
     render_welcome_dialog()
