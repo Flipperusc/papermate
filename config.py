@@ -109,6 +109,13 @@ class Settings:
     deepseek_base_url: str = env_value("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     deepseek_model: str = env_value("DEEPSEEK_MODEL", "deepseek-v4-pro")
 
+    # Markdown translation
+    translation_enabled: bool = env_bool("TRANSLATION_ENABLED", True)
+    translation_provider: str = normalize_provider(env_value("TRANSLATION_PROVIDER", "deepseek"))
+    translation_model: str = env_value("TRANSLATION_MODEL", "deepseek-chat")
+    translation_chunk_size: int = env_int("TRANSLATION_CHUNK_SIZE", 3500)
+    translation_timeout: int = env_int("TRANSLATION_TIMEOUT", 60)
+
     # PDF-to-Markdown
     pdf_parse_provider: str = normalize_provider(
         first_env(("PDF_PARSE_PROVIDER", "PAPERMATE_PDF_PARSE_PROVIDER"), "mineru")

@@ -26,11 +26,13 @@ class LLMClient:
         api_key: str | None = None,
         base_url: str | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        timeout: float | None = None,
     ) -> None:
         self.model = model or settings.deepseek_model
         self.api_key = api_key if api_key is not None else settings.deepseek_api_key
         self.base_url = base_url or settings.deepseek_base_url
         self.system_prompt = system_prompt
+        self.timeout = timeout
 
     def _create_client(self):
         """Create an OpenAI SDK client pointed at DeepSeek, not OpenAI default."""
@@ -44,7 +46,10 @@ class LLMClient:
             raise LLMError(ErrorCode.DEEPSEEK_CALL_FAILED) from exc
 
         try:
-            return OpenAI(api_key=self.api_key, base_url=self.base_url)
+            client_kwargs = {"api_key": self.api_key, "base_url": self.base_url}
+            if self.timeout is not None:
+                client_kwargs["timeout"] = self.timeout
+            return OpenAI(**client_kwargs)
         except Exception as exc:
             logger.exception("Failed to create DeepSeek OpenAI-compatible client.")
             raise LLMError(ErrorCode.DEEPSEEK_CALL_FAILED) from exc
