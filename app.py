@@ -13,6 +13,7 @@ import re
 import zipfile
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import unquote
 from uuid import uuid4
 
 import streamlit as st
@@ -566,33 +567,99 @@ def build_text_preview(parsed_pdf: dict[str, Any], limit: int = 1000) -> tuple[i
     return len(full_text), full_text[:limit]
 
 
-def markdown_for_display(markdown: str, images: list[dict[str, str]] | None = None) -> str:
+def normalize_markdown_image_ref(value: str) -> str:
+    """Normalize a Markdown image reference for matching extracted images."""
+    return unquote(str(value or "").split()[0].strip("\"'").replace("\\", "/"))
+
+
+def image_source_lookup(images: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    """Index extracted images by archive path, source path, and filename."""
+    lookup: dict[str, dict[str, Any]] = {}
+    for image in images or []:
+        refs = list(image.get("source_paths") or [])
+        for key in ("archive_name", "file_name"):
+            value = image.get(key)
+            if isinstance(value, str) and value.strip():
+                refs.append(value)
+
+        for ref in refs:
+            normalized = normalize_markdown_image_ref(str(ref))
+            if not normalized:
+                continue
+            lookup.setdefault(normalized, image)
+            lookup.setdefault(Path(normalized).name, image)
+    return lookup
+
+
+def visual_kind_from_label(label: str) -> str:
+    """Infer visual kind from a Markdown label."""
+    label = str(label or "")
+    if re.search(r"(?:表|table)", label, flags=re.IGNORECASE):
+        return "table"
+    if re.search(r"(?:图片|图|image|fig(?:ure)?\.?)", label, flags=re.IGNORECASE):
+        return "image"
+    if re.search(r"(?:公式|equation|formula)", label, flags=re.IGNORECASE):
+        return "equation"
+    return ""
+
+
+def visual_label_image_index(label: str) -> int | None:
+    """Return the visible image index encoded in a figure label."""
+    match = re.search(
+        r"(?:图片|图|image|fig(?:ure)?\.?)\s*(\d+)",
+        str(label or ""),
+        flags=re.IGNORECASE,
+    )
+    return int(match.group(1)) if match else None
+
+
+def visual_image_is_table_only(image: dict[str, Any] | None) -> bool:
+    """Return whether an extracted visual is a pure table screenshot."""
+    if not image:
+        return False
+    kind = str(image.get("kind") or "").lower()
+    source_kinds = {
+        str(kind_value).lower()
+        for kind_value in image.get("source_kinds") or []
+        if str(kind_value).strip()
+    }
+    return kind == "table" and "image" not in source_kinds
+
+
+def visual_image_is_previewable(image: dict[str, Any] | None) -> bool:
+    """Return whether a visual should be shown through inline image preview."""
+    return bool(image) and not visual_image_is_table_only(image)
+
+
+def markdown_for_display(markdown: str, images: list[dict[str, Any]] | None = None) -> str:
     """Return full Markdown with image payloads replaced by text placeholders."""
+    image_by_ref = image_source_lookup(images)
     next_image_index = 1
 
-    def next_placeholder() -> str:
+    def placeholder_for_visual(label: str = "", image: dict[str, Any] | None = None) -> str:
         nonlocal next_image_index
-        index = next_image_index
-        next_image_index += 1
-        return f"**此处图片{index}已省略**"
+        if visual_kind_from_label(label) == "table" or visual_image_is_table_only(image):
+            return ""
+
+        image_label = str(image.get("label") or "") if image else ""
+        image_index = visual_label_image_index(label) or visual_label_image_index(image_label)
+        if image_index is None:
+            image_index = next_image_index
+            next_image_index += 1
+        else:
+            next_image_index = max(next_image_index, image_index + 1)
+        return f"**此处图片{image_index}已省略**"
 
     safe_markdown = markdown or ""
     safe_markdown = re.sub(
-        r"!\[[^\]]*\]\(data:image[^)]*\)",
-        lambda _match: next_placeholder(),
+        r"!\[(?P<alt>[^\]]*)\]\(data:image[^)]*\)",
+        lambda match: placeholder_for_visual(match.group("alt")),
         safe_markdown,
         flags=re.IGNORECASE,
     )
 
     def replace_data_uri_link(match: re.Match[str]) -> str:
-        nonlocal next_image_index
-        label = match.group("label")
-        image_match = re.search(r"图\s*(\d+)", label)
-        if image_match:
-            image_index = int(image_match.group(1))
-            next_image_index = max(next_image_index, image_index + 1)
-            return f"**此处图片{image_index}已省略**"
-        return next_placeholder()
+        return placeholder_for_visual(match.group("label"))
 
     safe_markdown = re.sub(
         r"\[(?P<label>[^\]]*)\]\(data:image[^)]*\)",
@@ -601,23 +668,191 @@ def markdown_for_display(markdown: str, images: list[dict[str, str]] | None = No
         flags=re.IGNORECASE,
     )
     safe_markdown = re.sub(
-        r"\[(?P<label>[^\]]*(?:此处|图|image|figure)[^\]]*)\]\(\[\[PM_(?:DOC_)?PROTECTED_\d+\]\]\)",
+        r"\[(?P<label>[^\]]*(?:此处|图|表|公式|image|figure|table|equation|formula)[^\]]*)\]\(\[\[PM_(?:DOC_)?PROTECTED_\d+\]\]\)",
         replace_data_uri_link,
         safe_markdown,
         flags=re.IGNORECASE,
     )
+
+    def replace_markdown_image(match: re.Match[str]) -> str:
+        raw_target = match.group("target").strip().strip("\"'")
+        normalized = normalize_markdown_image_ref(raw_target)
+        image = image_by_ref.get(normalized) or image_by_ref.get(Path(normalized).name)
+        return placeholder_for_visual(match.group("alt"), image)
+
     safe_markdown = re.sub(
-        r"!\[[^\]]*\]\([^)]+\)",
-        lambda _match: next_placeholder(),
+        r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)",
+        replace_markdown_image,
         safe_markdown,
     )
+
+    def replace_html_image(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        src_match = re.search(r"\bsrc\s*=\s*[\"']?([^\"'>\s]+)", tag, flags=re.IGNORECASE)
+        image = None
+        if src_match:
+            normalized = normalize_markdown_image_ref(src_match.group(1))
+            image = image_by_ref.get(normalized) or image_by_ref.get(Path(normalized).name)
+        return placeholder_for_visual("", image)
+
     safe_markdown = re.sub(
         r"<img\b[^>]*>",
-        lambda _match: next_placeholder(),
+        replace_html_image,
         safe_markdown,
         flags=re.IGNORECASE,
     )
     return safe_markdown.strip()
+
+
+IMAGE_PLACEHOLDER_PATTERN = re.compile(r"\*\*此处图片(?P<index>\d+)已省略\*\*")
+
+
+def image_preview_state_key(key_prefix: str) -> str:
+    """Return the session key used for inline image preview visibility."""
+    return f"{key_prefix}_loaded_image_previews"
+
+
+def image_by_display_index(images: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Map visible Markdown image placeholder indexes to extracted images."""
+    indexed: dict[int, dict[str, Any]] = {}
+    fallback_sequence = 0
+    for image in images or []:
+        if not visual_image_is_previewable(image):
+            continue
+        label = str(image.get("label") or "")
+        image_index = visual_label_image_index(label)
+        if image_index is not None:
+            indexed.setdefault(image_index, image)
+            fallback_sequence = max(fallback_sequence, image_index)
+            continue
+
+        fallback_sequence += 1
+        indexed.setdefault(fallback_sequence, image)
+    return indexed
+
+
+def markdown_image_placeholder_occurrences(markdown_text: str) -> list[dict[str, int]]:
+    """Return image placeholder occurrences with display indexes."""
+    occurrences: list[dict[str, int]] = []
+    for occurrence, match in enumerate(IMAGE_PLACEHOLDER_PATTERN.finditer(markdown_text or ""), start=1):
+        occurrences.append({"occurrence": occurrence, "index": int(match.group("index"))})
+    return occurrences
+
+
+def render_inline_image_preview_controls(
+    markdown_text: str,
+    images: list[dict[str, Any]],
+    key_prefix: str,
+) -> None:
+    """Render one-click controls for Markdown inline image previews."""
+    image_lookup = image_by_display_index(images)
+    occurrences = [
+        item
+        for item in markdown_image_placeholder_occurrences(markdown_text)
+        if item["index"] in image_lookup
+    ]
+    if not occurrences or not images:
+        return
+    occurrence_ids = [item["occurrence"] for item in occurrences]
+
+    state_key = image_preview_state_key(key_prefix)
+    loaded = st.session_state.get(state_key)
+    if not isinstance(loaded, set):
+        loaded = set(loaded or [])
+    st.session_state[state_key] = loaded
+
+    loaded_count = len([occurrence for occurrence in occurrence_ids if occurrence in loaded])
+    control_cols = st.columns([0.62, 0.19, 0.19], gap="small")
+    with control_cols[0]:
+        st.caption(f"图片预览：已加载 {loaded_count}/{len(occurrence_ids)} 张")
+    with control_cols[1]:
+        if st.button(
+            "加载全部图片预览",
+            use_container_width=True,
+            disabled=loaded_count == len(occurrence_ids),
+            key=f"{key_prefix}_load_all_image_previews",
+        ):
+            st.session_state[state_key] = set(occurrence_ids)
+            st.rerun()
+    with control_cols[2]:
+        if st.button(
+            "收起全部预览",
+            use_container_width=True,
+            disabled=loaded_count == 0,
+            key=f"{key_prefix}_hide_all_image_previews",
+        ):
+            st.session_state[state_key] = set()
+            st.rerun()
+
+
+def render_markdown_with_image_previews(
+    markdown_text: str,
+    images: list[dict[str, Any]] | None,
+    key_prefix: str,
+) -> None:
+    """Render Markdown and add per-placeholder image preview buttons."""
+    markdown_text = markdown_text or ""
+    image_list = images or []
+    if not markdown_text.strip():
+        st.markdown("暂无 Markdown 内容", unsafe_allow_html=True)
+        return
+
+    render_inline_image_preview_controls(markdown_text, image_list, key_prefix)
+    image_lookup = image_by_display_index(image_list)
+    state_key = image_preview_state_key(key_prefix)
+    loaded = st.session_state.get(state_key)
+    if not isinstance(loaded, set):
+        loaded = set(loaded or [])
+        st.session_state[state_key] = loaded
+
+    position = 0
+    placeholder_count = 0
+    for match in IMAGE_PLACEHOLDER_PATTERN.finditer(markdown_text):
+        segment = markdown_text[position:match.start()]
+        if segment.strip():
+            st.markdown(segment, unsafe_allow_html=True)
+
+        image_index = int(match.group("index"))
+        placeholder_count += 1
+        image = image_lookup.get(image_index)
+        if image is None:
+            st.markdown(match.group(0), unsafe_allow_html=True)
+            position = match.end()
+            continue
+
+        button_label = "隐藏预览" if placeholder_count in loaded else "加载图片预览"
+        notice_cols = st.columns([0.74, 0.26], gap="small")
+        with notice_cols[0]:
+            st.markdown(f"**此处图片{image_index}已省略**")
+        with notice_cols[1]:
+            clicked = st.button(
+                button_label,
+                use_container_width=True,
+                disabled=image is None,
+                key=f"{key_prefix}_image_preview_{image_index}_{placeholder_count}",
+            )
+        if clicked:
+            updated = set(loaded)
+            if placeholder_count in updated:
+                updated.remove(placeholder_count)
+            else:
+                updated.add(placeholder_count)
+            st.session_state[state_key] = updated
+            st.rerun()
+
+        if placeholder_count in loaded and image:
+            image_path = Path(image.get("path", ""))
+            if image_path.exists() and image_path.is_file():
+                caption = str(image.get("label") or f"图片{image_index}")
+                st.image(str(image_path), caption=caption, use_container_width=True)
+            else:
+                st.warning(f"图片文件不存在：{image_path}")
+
+        position = match.end()
+
+    tail = markdown_text[position:]
+    if tail.strip():
+        st.markdown(tail, unsafe_allow_html=True)
 
 
 def split_paper_header(markdown: str) -> tuple[dict[str, str], str]:
@@ -4092,7 +4327,11 @@ def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
         if paper_header:
             st.caption(f"标题：{paper_header.get('title') or '未识别'}")
             st.caption(f"作者：{paper_header.get('authors') or '未识别'}")
-        st.markdown(body_markdown or safe_markdown or "暂无 Markdown 内容", unsafe_allow_html=True)
+        render_markdown_with_image_previews(
+            body_markdown or safe_markdown or "暂无 Markdown 内容",
+            images,
+            f"reader_{paper_id}_zh",
+        )
         return
 
     if reading_mode == "双语对照":
@@ -4116,7 +4355,11 @@ def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
     if paper_header:
         st.caption(f"标题：{paper_header.get('title') or '未识别'}")
         st.caption(f"作者：{paper_header.get('authors') or '未识别'}")
-    st.markdown(anchored_body or "暂无 Markdown 内容", unsafe_allow_html=True)
+    render_markdown_with_image_previews(
+        anchored_body or "暂无 Markdown 内容",
+        images,
+        f"reader_{paper_id}_source",
+    )
 
 
 def render_app() -> None:
