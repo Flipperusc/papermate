@@ -40,3 +40,7 @@ bm25/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Runtime backups
+backups/
+*.bak
