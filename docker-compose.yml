@@ -13,7 +13,23 @@ services:
     ports:
       - "127.0.0.1:8501:8501"
     command: >
+      sh -c "python scripts/init_db.py &&
       streamlit run app.py
       --server.address=0.0.0.0
       --server.port=8501
-      --server.headless=true
+      --server.headless=true"
+
+  papermate-worker:
+    build: .
+    container_name: papermate-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      PYTHONUNBUFFERED: "1"
+    command: >
+      sh -c "python scripts/init_db.py &&
+      python scripts/worker.py"
