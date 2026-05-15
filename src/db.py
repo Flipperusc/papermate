@@ -262,6 +262,7 @@ def ensure_schema_migrations(connection: sqlite3.Connection) -> None:
             "visibility": "TEXT NOT NULL DEFAULT 'private'",
         },
     )
+    migrate_card_libraries_team_unique(connection)
     ensure_columns(
         connection,
         "papers",
@@ -378,6 +379,74 @@ def ensure_schema_migrations(connection: sqlite3.Connection) -> None:
         """
     )
     migrate_legacy_team_scope(connection)
+
+
+def migrate_card_libraries_team_unique(connection: sqlite3.Connection) -> None:
+    """Replace legacy UNIQUE(user_id, name) with team-scoped uniqueness."""
+    unique_indexes = [
+        dict(row)
+        for row in connection.execute("PRAGMA index_list(card_libraries)").fetchall()
+        if int(row["unique"]) == 1
+    ]
+    needs_migration = False
+    for index in unique_indexes:
+        columns = [
+            row["name"]
+            for row in connection.execute(f"PRAGMA index_info({index['name']})").fetchall()
+        ]
+        if columns == ["user_id", "name"]:
+            needs_migration = True
+            break
+
+    if not needs_migration:
+        return
+
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.execute("ALTER TABLE card_libraries RENAME TO card_libraries_legacy_unique")
+        connection.execute(
+            """
+            CREATE TABLE card_libraries (
+                library_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                team_id INTEGER,
+                visibility TEXT NOT NULL DEFAULT 'private',
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (team_id) REFERENCES teams (team_id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+                UNIQUE (user_id, team_id, name)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO card_libraries (
+                library_id,
+                user_id,
+                team_id,
+                visibility,
+                name,
+                created_at,
+                updated_at
+            )
+            SELECT
+                library_id,
+                user_id,
+                team_id,
+                COALESCE(NULLIF(visibility, ''), 'private'),
+                name,
+                COALESCE(created_at, CURRENT_TIMESTAMP),
+                COALESCE(updated_at, created_at, CURRENT_TIMESTAMP)
+            FROM card_libraries_legacy_unique
+            """
+        )
+        connection.execute("DROP TABLE card_libraries_legacy_unique")
+        connection.commit()
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
 
 
 def migrate_literature_cards_allow_duplicates(connection: sqlite3.Connection) -> None:

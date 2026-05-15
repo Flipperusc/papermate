@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from typing import Any
 
 from src.card_pipeline import UNKNOWN_VALUE
@@ -54,13 +55,46 @@ def ensure_default_card_library(user_id: int, team_id: int | None = None) -> dic
         if row:
             return dict(row)
 
-        cursor = connection.execute(
-            """
-            INSERT INTO card_libraries (user_id, team_id, name)
-            VALUES (?, ?, ?)
-            """,
-            (int(user_id), team_id, DEFAULT_LIBRARY_NAME),
-        )
+        try:
+            cursor = connection.execute(
+                """
+                INSERT INTO card_libraries (user_id, team_id, name)
+                VALUES (?, ?, ?)
+                """,
+                (int(user_id), team_id, DEFAULT_LIBRARY_NAME),
+            )
+        except sqlite3.IntegrityError:
+            legacy_row = connection.execute(
+                """
+                SELECT library_id, user_id, team_id, name, created_at, updated_at
+                FROM card_libraries
+                WHERE user_id = ?
+                    AND name = ?
+                ORDER BY
+                    CASE
+                        WHEN team_id = ? THEN 1
+                        WHEN team_id IS NULL THEN 2
+                        ELSE 3
+                    END,
+                    updated_at DESC,
+                    library_id DESC
+                LIMIT 1
+                """,
+                (int(user_id), DEFAULT_LIBRARY_NAME, team_id),
+            ).fetchone()
+            if legacy_row:
+                if team_id is not None and legacy_row["team_id"] is None:
+                    connection.execute(
+                        """
+                        UPDATE card_libraries
+                        SET team_id = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE library_id = ?
+                        """,
+                        (int(team_id), int(legacy_row["library_id"])),
+                    )
+                    return get_card_library(int(legacy_row["library_id"]), user_id, team_id=team_id) or dict(legacy_row)
+                return dict(legacy_row)
+            raise
         library_id = int(cursor.lastrowid)
 
     return get_card_library(library_id, user_id, team_id=team_id) or {

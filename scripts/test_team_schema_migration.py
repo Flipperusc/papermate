@@ -40,11 +40,36 @@ def table_columns(table_name: str) -> set[str]:
     return {str(row["name"]) for row in rows}
 
 
+def unique_index_columns(table_name: str) -> list[list[str]]:
+    """Return unique index column lists for a SQLite table."""
+    with get_db_connection() as connection:
+        indexes = [
+            dict(row)
+            for row in connection.execute(f"PRAGMA index_list({table_name})").fetchall()
+            if int(row["unique"]) == 1
+        ]
+        return [
+            [
+                str(info["name"])
+                for info in connection.execute(f"PRAGMA index_info({index['name']})").fetchall()
+            ]
+            for index in indexes
+        ]
+
+
 def main() -> None:
     init_db()
     for table_name, expected_columns in REQUIRED_COLUMNS.items():
         missing = expected_columns - table_columns(table_name)
         assert not missing, f"{table_name} missing columns: {sorted(missing)}"
+
+    card_library_unique_indexes = unique_index_columns("card_libraries")
+    assert ["user_id", "team_id", "name"] in card_library_unique_indexes, (
+        "card_libraries should be unique per user/team/name, not globally per user/name"
+    )
+    assert ["user_id", "name"] not in card_library_unique_indexes, (
+        "legacy card_libraries UNIQUE(user_id, name) should be migrated away"
+    )
 
     with get_db_connection() as connection:
         user_count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
