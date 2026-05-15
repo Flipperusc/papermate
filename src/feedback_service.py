@@ -38,6 +38,9 @@ def save_feedback(
     comment: str = "",
     qa_log_id: int | None = None,
     chunk_id: str | None = None,
+    user_id: int | None = None,
+    team_id: int | None = None,
+    project_id: int | None = None,
 ) -> dict[str, Any]:
     """Save feedback and create a bad case for negative feedback."""
     init_db()
@@ -45,23 +48,41 @@ def save_feedback(
     rating = 1 if feedback_type == POSITIVE_FEEDBACK else 0
 
     with get_db_connection() as connection:
+        if team_id is None or project_id is None:
+            paper_row = connection.execute(
+                """
+                SELECT team_id, project_id
+                FROM papers
+                WHERE paper_id = ?
+                """,
+                (paper_id,),
+            ).fetchone()
+            if paper_row:
+                team_id = team_id if team_id is not None else paper_row["team_id"]
+                project_id = project_id if project_id is not None else paper_row["project_id"]
         feedback_cursor = connection.execute(
             """
             INSERT INTO feedback (
                 paper_id,
                 chunk_id,
                 qa_log_id,
+                user_id,
+                team_id,
+                project_id,
                 rating,
                 feedback_type,
                 is_negative,
                 comment
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 paper_id,
                 chunk_id,
                 qa_log_id,
+                user_id,
+                team_id,
+                project_id,
                 rating,
                 feedback_type,
                 1 if is_negative else 0,
@@ -78,6 +99,9 @@ def save_feedback(
                 """
                 INSERT INTO bad_cases (
                     paper_id,
+                    user_id,
+                    team_id,
+                    project_id,
                     question,
                     answer,
                     error_type,
@@ -87,10 +111,13 @@ def save_feedback(
                     actual_answer,
                     notes
                 )
-                VALUES (?, ?, ?, ?, '', '', 'open', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 'open', ?, ?)
                 """,
                 (
                     paper_id,
+                    user_id,
+                    team_id,
+                    project_id,
                     question,
                     answer,
                     feedback_type,
@@ -107,18 +134,30 @@ def save_feedback(
     }
 
 
-def list_feedback_records(limit: int = 200) -> list[dict[str, Any]]:
+def list_feedback_records(
+    limit: int = 200,
+    team_id: int | None = None,
+) -> list[dict[str, Any]]:
     """Return recent feedback records with paper and QA context."""
     init_db()
 
+    where_sql = "WHERE f.team_id = ?" if team_id is not None else ""
+    parameters: list[Any] = []
+    if team_id is not None:
+        parameters.append(int(team_id))
+    parameters.append(limit)
     with get_db_connection() as connection:
         rows = connection.execute(
-            """
+            f"""
             SELECT
                 f.feedback_id,
                 f.paper_id,
                 p.file_name,
                 f.qa_log_id,
+                f.user_id,
+                f.team_id,
+                f.project_id,
+                u.username,
                 q.question,
                 q.answer,
                 f.feedback_type,
@@ -128,26 +167,36 @@ def list_feedback_records(limit: int = 200) -> list[dict[str, Any]]:
             FROM feedback f
             LEFT JOIN papers p ON p.paper_id = f.paper_id
             LEFT JOIN qa_logs q ON q.qa_log_id = f.qa_log_id
+            LEFT JOIN users u ON u.user_id = f.user_id
+            {where_sql}
             ORDER BY f.created_at DESC, f.feedback_id DESC
             LIMIT ?
             """,
-            (limit,),
+            parameters,
         ).fetchall()
 
     return [dict(row) for row in rows]
 
 
-def list_bad_cases(limit: int = 200) -> list[dict[str, Any]]:
+def list_bad_cases(limit: int = 200, team_id: int | None = None) -> list[dict[str, Any]]:
     """Return recent bad cases with paper context."""
     init_db()
 
+    where_sql = "WHERE b.team_id = ?" if team_id is not None else ""
+    parameters: list[Any] = []
+    if team_id is not None:
+        parameters.append(int(team_id))
+    parameters.append(limit)
     with get_db_connection() as connection:
         rows = connection.execute(
-            """
+            f"""
             SELECT
                 b.bad_case_id,
                 b.paper_id,
                 p.file_name,
+                b.user_id,
+                b.team_id,
+                b.project_id,
                 b.question,
                 b.answer,
                 b.error_type,
@@ -158,10 +207,11 @@ def list_bad_cases(limit: int = 200) -> list[dict[str, Any]]:
                 b.created_at
             FROM bad_cases b
             LEFT JOIN papers p ON p.paper_id = b.paper_id
+            {where_sql}
             ORDER BY b.created_at DESC, b.bad_case_id DESC
             LIMIT ?
             """,
-            (limit,),
+            parameters,
         ).fetchall()
 
     return [dict(row) for row in rows]

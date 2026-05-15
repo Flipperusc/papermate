@@ -907,8 +907,10 @@ class MinerUClient:
             import fitz
 
             return fitz.open(pdf_path)
+        except ModuleNotFoundError:
+            logger.warning("PyMuPDF is not installed; visual cropping is skipped. Install with: pip install PyMuPDF")
         except Exception:
-            logger.exception("Failed to open PDF for visual cropping.")
+            logger.warning("Failed to open PDF for visual cropping; visual crop images are skipped.", exc_info=True)
             return None
 
     def fitz_matrix(self, zoom: float) -> Any:

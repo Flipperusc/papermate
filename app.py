@@ -36,6 +36,7 @@ from src.errors import (
     VectorStoreError,
 )
 from src.feedback_service import FEEDBACK_OPTIONS, list_bad_cases, list_feedback_records, save_feedback
+from src.job_service import cancel_job, enqueue_job, latest_job_for_paper, list_jobs, retry_job
 from src.literature_card_service import (
     CARD_FIELD_LABELS,
     claim_unassigned_literature_cards,
@@ -54,9 +55,34 @@ from src.literature_card_service import (
 )
 from src.logger import get_logger
 from src.markdown_translator import translate_markdown_to_chinese
+from src.paper_service import (
+    chunks_to_markdown,
+    delete_team_papers,
+    file_sha256,
+    find_team_paper_by_hash,
+    get_accessible_paper,
+    list_accessible_papers,
+    paper_to_processed_pdf,
+    update_paper_status,
+)
 from src.pdf_parser import parse_pdf
 from src.rag_pipeline import answer_question
 from src.retrieval.bm25_store import BM25Store
+from src.team_service import (
+    TEAM_ROLES,
+    add_team_member_by_username,
+    can_manage_team,
+    can_write,
+    create_project,
+    create_team,
+    ensure_user_workspace,
+    get_user_team_role,
+    list_projects,
+    list_team_members,
+    list_user_teams,
+    remove_team_member,
+    update_team_member_role,
+)
 from src.vector_store import VectorStore
 
 
@@ -473,8 +499,50 @@ def set_current_user(user: dict[str, Any]) -> None:
 
 def prepare_user_workspace(user_id: int) -> None:
     """Ensure required per-user card storage exists."""
-    ensure_default_card_library(user_id)
-    claim_unassigned_literature_cards(user_id)
+    workspace = ensure_user_workspace(user_id)
+    team_id = int(workspace["team_id"])
+    ensure_default_card_library(user_id, team_id=team_id)
+    claim_unassigned_literature_cards(user_id, team_id=team_id)
+
+
+def current_team_context() -> dict[str, Any]:
+    """Return the selected team and project for the current user."""
+    user_id = current_user_id()
+    teams = list_user_teams(user_id)
+    if not teams:
+        workspace = ensure_user_workspace(user_id)
+        teams = list_user_teams(user_id)
+        if not teams:
+            raise RuntimeError(f"无法创建团队工作区：{workspace}")
+
+    team_ids = [int(team["team_id"]) for team in teams]
+    selected_team_id = st.session_state.get("current_team_id")
+    if int(selected_team_id or 0) not in team_ids:
+        selected_team_id = team_ids[0]
+        st.session_state["current_team_id"] = selected_team_id
+
+    projects = list_projects(user_id, int(selected_team_id))
+    project_ids = [int(project["project_id"]) for project in projects]
+    selected_project_id = st.session_state.get("current_project_id")
+    if project_ids and int(selected_project_id or 0) not in project_ids:
+        selected_project_id = project_ids[0]
+        st.session_state["current_project_id"] = selected_project_id
+
+    team = next(team for team in teams if int(team["team_id"]) == int(selected_team_id))
+    project = (
+        next((project for project in projects if int(project["project_id"]) == int(selected_project_id)), None)
+        if project_ids
+        else None
+    )
+    return {
+        "team": team,
+        "teams": teams,
+        "team_id": int(selected_team_id),
+        "role": str(team.get("role") or "viewer"),
+        "projects": projects,
+        "project": project,
+        "project_id": int(project["project_id"]) if project else None,
+    }
 
 
 def clear_authenticated_session() -> None:
@@ -523,6 +591,12 @@ def render_sidebar_navigation(user: dict[str, Any]) -> str:
     return render_sidebar(user)
 
 
+def navigate_to_page(page_label: str) -> None:
+    """Request a sidebar navigation change before the next radio widget render."""
+    st.session_state["pm_pending_nav_page"] = page_label
+    st.rerun()
+
+
 def format_file_size(size_bytes: int) -> str:
     """Format a byte count for display."""
     if size_bytes < 1024:
@@ -543,6 +617,7 @@ def save_uploaded_pdf(uploaded_file: UploadedFile) -> dict[str, Any]:
         raise UploadError(ErrorCode.EMPTY_FILE)
 
     paper_id = uuid4().hex
+    digest = file_sha256(file_bytes)
 
     try:
         upload_dir, _ = ensure_data_directories()
@@ -557,6 +632,7 @@ def save_uploaded_pdf(uploaded_file: UploadedFile) -> dict[str, Any]:
         "file_size_bytes": len(file_bytes),
         "file_size": format_file_size(len(file_bytes)),
         "save_path": str(save_path.resolve()),
+        "file_sha256": digest,
     }
 
 
@@ -1153,7 +1229,12 @@ def get_uploaded_file_signature(uploaded_file: UploadedFile) -> str:
     return f"{uploaded_file.name}:{len(file_bytes)}:{digest}:{parse_settings}"
 
 
-def process_uploaded_pdf(uploaded_file: UploadedFile) -> dict[str, Any]:
+def process_uploaded_pdf(
+    uploaded_file: UploadedFile,
+    user_id: int | None = None,
+    team_id: int | None = None,
+    project_id: int | None = None,
+) -> dict[str, Any]:
     """Save, parse, chunk, and persist an uploaded PDF once per session file."""
     signature = get_uploaded_file_signature(uploaded_file)
     cached_result = st.session_state.get("processed_pdf")
@@ -1177,6 +1258,16 @@ def process_uploaded_pdf(uploaded_file: UploadedFile) -> dict[str, Any]:
                 "file_name": saved_file["file_name"],
                 "file_size_bytes": saved_file["file_size_bytes"],
                 "save_path": saved_file["save_path"],
+                "owner_user_id": user_id,
+                "team_id": team_id,
+                "project_id": project_id,
+                "file_sha256": saved_file.get("file_sha256", ""),
+                "parse_status": "succeeded",
+                "parser": parsed_pdf.get("parser", ""),
+                "markdown_path": parsed_pdf.get("markdown_path"),
+                "translated_markdown_path": parsed_pdf.get("translated_markdown_path"),
+                "content_list_path": parsed_pdf.get("content_list_path"),
+                "images": parsed_pdf.get("images", []),
                 "page_count": parsed_pdf["page_count"],
                 "total_chars": total_chars,
             },
@@ -1204,6 +1295,24 @@ def local_index_state(paper_id: str) -> dict[str, str]:
     state = st.session_state.get(state_key, {})
     vector_status = str(state.get("vector") or "未知")
     bm25_status = str(state.get("bm25") or "未知")
+
+    if vector_status == "未知" or bm25_status == "未知":
+        try:
+            paper = get_accessible_paper(paper_id, current_user_id())
+        except Exception:
+            paper = None
+        if paper and paper.get("index_status") == "succeeded":
+            vector_status = "已构建"
+            bm25_status = "已构建"
+        elif paper and paper.get("index_status") == "queued":
+            vector_status = vector_status if vector_status != "未知" else "排队中"
+            bm25_status = bm25_status if bm25_status != "未知" else "排队中"
+        elif paper and paper.get("index_status") == "running":
+            vector_status = vector_status if vector_status != "未知" else "构建中"
+            bm25_status = bm25_status if bm25_status != "未知" else "构建中"
+        elif paper and paper.get("index_status") == "failed":
+            vector_status = vector_status if vector_status != "未知" else "失败"
+            bm25_status = bm25_status if bm25_status != "未知" else "失败"
 
     bm25_payload = settings.bm25_dir / f"{paper_id}_payloads.json"
     bm25_pickle = settings.bm25_dir / f"{paper_id}_bm25.pkl"
@@ -1437,6 +1546,10 @@ def needs_index_warning(details: dict[str, Any]) -> bool:
 
 def render_feedback_form(qa_record: dict[str, Any]) -> None:
     """Render feedback controls under an answer."""
+    team_context = current_team_context()
+    if not can_write(team_context["role"]):
+        st.caption("当前团队角色为只读，不能提交新的反馈。")
+        return
     paper_id = qa_record["paper_id"]
     qa_log_id = qa_record.get("qa_log_id")
     record_key = qa_log_id or hashlib.sha256(
@@ -1468,6 +1581,9 @@ def render_feedback_form(qa_record: dict[str, Any]) -> None:
                 feedback_type=feedback_type,
                 comment=comment.strip(),
                 qa_log_id=qa_log_id,
+                user_id=current_user_id(),
+                team_id=int(team_context["team_id"]),
+                project_id=team_context.get("project_id"),
             )
         except (OSError, sqlite3.Error):
             st.error("反馈保存失败，请检查 SQLite 数据库权限。")
@@ -1542,7 +1658,7 @@ def card_option_label(card: dict[str, Any]) -> str:
     return f"{title} · {year} · {library_name} · {file_name}"
 
 
-def render_card_edit_form(card: dict[str, Any], user_id: int) -> None:
+def render_card_edit_form(card: dict[str, Any], user_id: int, team_id: int | None = None) -> None:
     """Render edit form for one literature card."""
     with st.form(key=f"edit_card_{card['card_id']}"):
         values: dict[str, str] = {}
@@ -1557,7 +1673,7 @@ def render_card_edit_form(card: dict[str, Any], user_id: int) -> None:
 
     if submitted:
         try:
-            update_literature_card(int(card["card_id"]), values, user_id=user_id)
+            update_literature_card(int(card["card_id"]), values, user_id=user_id, team_id=team_id)
         except (OSError, sqlite3.Error):
             st.error("文献卡片更新失败，请检查 SQLite 数据库权限。")
             return
@@ -1565,12 +1681,12 @@ def render_card_edit_form(card: dict[str, Any], user_id: int) -> None:
         st.rerun()
 
 
-def render_card_delete(card_id: int, user_id: int) -> None:
+def render_card_delete(card_id: int, user_id: int, team_id: int | None = None) -> None:
     """Render delete confirmation controls."""
     confirm = st.checkbox("确认删除这张文献卡片", key=f"confirm_delete_{card_id}")
     if st.button("删除文献卡片", disabled=not confirm, use_container_width=True):
         try:
-            delete_literature_card(card_id, user_id=user_id)
+            delete_literature_card(card_id, user_id=user_id, team_id=team_id)
         except (OSError, sqlite3.Error):
             st.error("文献卡片删除失败，请检查 SQLite 数据库权限。")
             return
@@ -1583,7 +1699,7 @@ def library_option_label(library: dict[str, Any]) -> str:
     return f"{library['name']}（{int(library.get('card_count') or 0)} 张）"
 
 
-def render_library_create_form(user_id: int, key_suffix: str = "") -> None:
+def render_library_create_form(user_id: int, key_suffix: str = "", team_id: int | None = None) -> None:
     """Render a form that creates a user-owned card library."""
     with st.form(key=f"create_library_form{key_suffix}"):
         new_library_name = st.text_input(
@@ -1595,7 +1711,7 @@ def render_library_create_form(user_id: int, key_suffix: str = "") -> None:
 
     if submitted:
         try:
-            create_card_library(user_id, new_library_name)
+            create_card_library(user_id, new_library_name, team_id=team_id)
         except sqlite3.IntegrityError:
             st.error("这个卡片库名字已经存在。")
         except (ValueError, OSError, sqlite3.Error) as exc:
@@ -1605,7 +1721,7 @@ def render_library_create_form(user_id: int, key_suffix: str = "") -> None:
             st.rerun()
 
 
-def render_library_rename_form(user_id: int, library: dict[str, Any]) -> None:
+def render_library_rename_form(user_id: int, library: dict[str, Any], team_id: int | None = None) -> None:
     """Render a form that renames a user-owned card library."""
     with st.form(key=f"rename_library_{library['library_id']}"):
         new_name = st.text_input("新的卡片库名称", value=str(library["name"]))
@@ -1613,7 +1729,7 @@ def render_library_rename_form(user_id: int, library: dict[str, Any]) -> None:
 
     if submitted:
         try:
-            update_card_library(int(library["library_id"]), user_id, new_name)
+            update_card_library(int(library["library_id"]), user_id, new_name, team_id=team_id)
         except sqlite3.IntegrityError:
             st.error("这个卡片库名字已经存在。")
         except (ValueError, OSError, sqlite3.Error) as exc:
@@ -1892,6 +2008,8 @@ def render_auth_card() -> None:
 
 def render_sidebar(user: dict[str, Any]) -> str:
     """Render the research-workspace sidebar and return the selected page."""
+    team_context = current_team_context()
+    role = team_context["role"]
     processed_pdf = st.session_state.get("processed_pdf")
     paper_id = str((processed_pdf or {}).get("saved_file", {}).get("paper_id") or "")
     index_state = local_index_state(paper_id) if paper_id else {"vector": "未知", "bm25": "未知"}
@@ -1912,11 +2030,52 @@ def render_sidebar(user: dict[str, Any]) -> str:
         """,
         unsafe_allow_html=True,
     )
+    team_options = [int(team["team_id"]) for team in team_context["teams"]]
+    selected_team_id = st.sidebar.selectbox(
+        "团队",
+        options=team_options,
+        index=team_options.index(int(team_context["team_id"])),
+        format_func=lambda team_id: next(
+            f"{team['name']}（{team.get('role', 'viewer')}）"
+            for team in team_context["teams"]
+            if int(team["team_id"]) == int(team_id)
+        ),
+        key="current_team_id",
+    )
+    if int(selected_team_id) != int(team_context["team_id"]):
+        st.session_state.pop("processed_pdf", None)
+        st.rerun()
+
+    project_options = [int(project["project_id"]) for project in team_context["projects"]]
+    if project_options:
+        selected_project_id = st.sidebar.selectbox(
+            "项目",
+            options=project_options,
+            index=project_options.index(int(team_context["project_id"])),
+            format_func=lambda project_id: next(
+                project["name"]
+                for project in team_context["projects"]
+                if int(project["project_id"]) == int(project_id)
+            ),
+            key="current_project_id",
+        )
+        if int(selected_project_id) != int(team_context["project_id"]):
+            st.session_state.pop("processed_pdf", None)
+            st.rerun()
+
     page_labels = {
         "📄 论文工作台": "论文工作台",
+        "📚 论文库": "论文库",
         "🗂 文献卡片库": "文献卡片库",
         "🧪 反馈记录": "反馈记录",
     }
+    if can_manage_team(role):
+        page_labels["👥 团队管理"] = "团队管理"
+    pending_page = st.session_state.pop("pm_pending_nav_page", None)
+    if pending_page in page_labels:
+        st.session_state["pm_nav_page"] = pending_page
+    if st.session_state.get("pm_nav_page") not in page_labels:
+        st.session_state["pm_nav_page"] = next(iter(page_labels))
     selected_label = st.sidebar.radio(
         "页面",
         list(page_labels.keys()),
@@ -1932,6 +2091,7 @@ def render_sidebar(user: dict[str, Any]) -> str:
             {render_status_badge("私有存储", "primary")}
           </div>
           <div style="margin-top:10px;">{render_status_badge("RAG 就绪" if rag_ready else "RAG 未就绪", "success" if rag_ready else "warning")}</div>
+          <div style="margin-top:10px;">{render_status_badge(f"角色 {role}", "info")}</div>
           <div style="margin-top:10px;">版本：v{html.escape(__version__)}</div>
           <div>PDF 解析 · Hybrid RAG · 文献卡片</div>
         </div>
@@ -1959,6 +2119,10 @@ def render_index_builder(chunks: list[dict[str, Any]]) -> None:
 
     paper_id = str(chunks[0].get("paper_id") or "")
     index_state = local_index_state(paper_id)
+    team_context = current_team_context()
+    role = team_context["role"]
+    can_edit = can_write(role)
+    index_busy = index_state["vector"] in {"排队中", "构建中"} or index_state["bm25"] in {"排队中", "构建中"}
     st.markdown(
         f"""
         <div class="pm-section-card">
@@ -1977,46 +2141,41 @@ def render_index_builder(chunks: list[dict[str, Any]]) -> None:
         unsafe_allow_html=True,
     )
 
-    if st.button("构建论文索引", type="primary", use_container_width=True, key="build_paper_index"):
-        vector_count: int | None = None
-        bm25_result: dict[str, Any] | None = None
-        vector_error: Exception | None = None
-        bm25_error: Exception | None = None
-
-        with st.spinner("正在构建 Hybrid 索引..."):
-            try:
-                vector_count = VectorStore().add_chunks(chunks)
-            except (EmbeddingError, VectorStoreError) as exc:
-                vector_error = exc
-                logger.exception("Vector index build failed. paper_id=%s", paper_id)
-
-            try:
-                bm25_result = BM25Store().build_index(paper_id, chunks)
-            except AppError as exc:
-                bm25_error = exc
-                logger.exception("BM25 index build failed. paper_id=%s", paper_id)
-
-        st.session_state[f"index_state_{paper_id}"] = {
-            "vector": "已构建" if vector_error is None else "失败",
-            "bm25": "已构建" if bm25_error is None else "失败",
-        }
-        if vector_error is None and bm25_error is None:
-            st.toast("论文索引已构建。")
-            st.success(
-                f"论文索引构建完成。向量 chunk：{vector_count or 0}；关键词 chunk：{bm25_result.get('chunk_count', 0) if bm25_result else 0}。"
-            )
-            return
-        if vector_error is None and bm25_error is not None:
-            st.warning("向量索引已构建成功，但关键词索引构建失败。当前仍可使用语义检索。")
-            return
-        if vector_error is not None and bm25_error is None:
-            st.warning("关键词索引已构建成功，但向量索引构建失败。当前可使用关键词检索。")
-            return
-        render_error_card(
-            "索引构建失败",
-            "请检查 API Key、网络连接和本地写入权限后重试。",
-            f"vector_error={vector_error}; bm25_error={bm25_error}",
+    latest_index_job = latest_job_for_paper(int(team_context["team_id"]), paper_id, "index")
+    if latest_index_job:
+        st.caption(
+            f"最近索引任务：#{latest_index_job['job_id']} · {latest_index_job['status']} · {latest_index_job.get('updated_at') or latest_index_job.get('created_at')}"
         )
+    if index_state["vector"] in {"排队中", "构建中"} or index_state["bm25"] in {"排队中", "构建中"}:
+        st.info("索引正在后台排队或构建中。请保持 worker 运行并耐心等待，完成后即可开始基于原文问答。")
+
+    if st.button(
+        "构建论文索引",
+        type="primary",
+        use_container_width=True,
+        key="build_paper_index",
+        disabled=not can_edit or index_busy,
+    ):
+        try:
+            paper = get_accessible_paper(paper_id, current_user_id(), minimum_role="editor")
+            if not paper:
+                raise PermissionError("没有找到当前论文或无权构建索引。")
+            job_id = enqueue_job(
+                "index",
+                user_id=current_user_id(),
+                team_id=int(paper["team_id"]),
+                project_id=paper.get("project_id"),
+                paper_id=paper_id,
+                payload={"paper_id": paper_id},
+            )
+            update_paper_status(paper_id, index_status="running")
+            st.session_state[f"index_state_{paper_id}"] = {"vector": "构建中", "bm25": "构建中"}
+            st.success(f"索引任务已入队：#{job_id}。请运行 worker 后查看任务状态。")
+        except Exception as exc:
+            logger.exception("Index job enqueue failed. paper_id=%s", paper_id)
+            render_error_card("索引任务创建失败", "请检查团队权限和数据库状态。", str(exc))
+    if not can_edit:
+        st.caption("当前团队角色为只读，无法构建索引。")
 
 
 @st.cache_resource(show_spinner=False)
@@ -2185,6 +2344,8 @@ def render_citations(citations: list[dict[str, Any]]) -> None:
 
 def render_qa_box(paper_id: str) -> None:
     """Render RAG question-answering controls."""
+    team_context = current_team_context()
+    can_edit = can_write(team_context["role"])
     index_state = local_index_state(paper_id)
     index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
     st.markdown(
@@ -2211,6 +2372,14 @@ def render_qa_box(paper_id: str) -> None:
             "请先构建索引，然后再开始基于论文原文问答。",
             "先构建论文索引",
             icon="🧭",
+        )
+        return
+
+    if not can_edit:
+        render_empty_state(
+            "只读角色不能提问",
+            "当前团队角色为 viewer，可阅读论文和查看已有内容，但不能创建新的问答记录。",
+            icon="READ",
         )
         return
 
@@ -2246,7 +2415,7 @@ def render_qa_box(paper_id: str) -> None:
             return
         try:
             with st.spinner("正在检索论文片段并生成回答..."):
-                rag_result = answer_question(paper_id, question)
+                rag_result = answer_question(paper_id, question, user_id=current_user_id())
         except AppError as exc:
             logger.exception("RAG question answering failed. paper_id=%s", paper_id)
             if exc.code in {ErrorCode.VECTOR_SEARCH_FAILED, ErrorCode.BM25_INDEX_MISSING}:
@@ -2262,7 +2431,7 @@ def render_qa_box(paper_id: str) -> None:
         qa_log_id = rag_result.get("qa_id")
         if qa_log_id is None:
             try:
-                qa_log_id = save_qa_log(paper_id, question.strip(), rag_result["answer"])
+                qa_log_id = save_qa_log(paper_id, question.strip(), rag_result["answer"], user_id=current_user_id())
             except (OSError, sqlite3.Error):
                 logger.exception("QA log save failed. paper_id=%s", paper_id)
                 st.warning("问答记录保存失败，但不影响当前回答。")
@@ -2296,6 +2465,8 @@ def render_literature_card_save(
     user_id: int,
 ) -> None:
     """Render literature-card generation and persistence."""
+    team_context = current_team_context()
+    can_edit = can_write(team_context["role"])
     st.markdown(
         f"""
         <div class="pm-section-card">
@@ -2315,9 +2486,12 @@ def render_literature_card_save(
         return
     if db_save_failed:
         st.warning("数据库保存失败，文献卡片可能无法基于完整 chunks 生成。")
+    if not can_edit:
+        render_empty_state("只读角色不能生成卡片", "当前团队角色为 viewer，可查看已有卡片，不能创建新卡片。", icon="CARD")
+        return
 
     try:
-        libraries = list_card_libraries(user_id)
+        libraries = list_card_libraries(user_id, team_id=int(team_context["team_id"]))
     except (OSError, sqlite3.Error) as exc:
         render_error_card("卡片库读取失败", "请检查 SQLite 数据库权限。", str(exc))
         return
@@ -2336,16 +2510,29 @@ def render_literature_card_save(
         key=f"target_library_{paper_id}",
     )
     with st.expander("新建卡片库", expanded=False):
-        render_library_create_form(user_id, key_suffix=f"_for_{paper_id}")
+        render_library_create_form(user_id, key_suffix=f"_for_{paper_id}", team_id=int(team_context["team_id"]))
 
     generated_key = f"generated_card_markdown_{paper_id}"
     if st.button("生成文献卡片", type="primary", use_container_width=True, key=f"generate_card_{paper_id}"):
         try:
-            with st.spinner("正在生成文献卡片..."):
-                st.session_state[generated_key] = generate_literature_card(paper_id)
-        except LLMError as exc:
-            render_error_card("文献卡片生成失败", exc.message, f"错误码：{exc.code.value}")
+            job_id = enqueue_job(
+                "card",
+                user_id=user_id,
+                team_id=int(team_context["team_id"]),
+                project_id=team_context.get("project_id"),
+                paper_id=paper_id,
+                payload={"paper_id": paper_id, "library_id": int(selected_library_id)},
+            )
+            st.success(f"文献卡片生成任务已入队：#{job_id}。worker 完成后会自动保存到所选卡片库。")
+        except Exception as exc:
+            render_error_card("文献卡片任务创建失败", str(exc) or "请检查团队权限和数据库状态。")
             return
+
+    latest_card_job = latest_job_for_paper(int(team_context["team_id"]), paper_id, "card")
+    if latest_card_job:
+        st.caption(
+            f"最近卡片任务：#{latest_card_job['job_id']} · {latest_card_job['status']} · {latest_card_job.get('updated_at') or latest_card_job.get('created_at')}"
+        )
 
     generated_markdown = st.session_state.get(generated_key)
     if generated_markdown:
@@ -2365,18 +2552,20 @@ def render_literature_card_save(
                     str(st.session_state.get(f"generated_card_preview_{paper_id}") or generated_markdown),
                     user_id=user_id,
                     library_id=int(selected_library_id),
+                    team_id=int(team_context["team_id"]),
+                    project_id=team_context.get("project_id"),
                 )
             except (ValueError, OSError, sqlite3.Error) as exc:
                 render_error_card("文献卡片保存失败", str(exc) or "请检查 SQLite 数据库权限。")
                 return
 
             st.session_state[f"saved_card_id_{paper_id}"] = card_id
-            library = get_card_library(int(selected_library_id), user_id)
+            library = get_card_library(int(selected_library_id), user_id, team_id=int(team_context["team_id"]))
             library_name = library["name"] if library else "所选卡片库"
             st.toast("文献卡片已保存。")
             st.success(f"新文献卡片已保存到「{library_name}」。")
 
-    saved_card = get_literature_card_by_paper(paper_id, user_id=user_id)
+    saved_card = get_literature_card_by_paper(paper_id, user_id=user_id, team_id=int(team_context["team_id"]))
     if saved_card:
         with st.expander("最近保存的卡片预览", expanded=False):
             render_literature_card(saved_card)
@@ -2429,6 +2618,7 @@ def _feedback_badge_type(feedback_type: Any, is_negative: Any = 0) -> str:
 
 def render_feedback_records_page() -> None:
     """Render saved user feedback and bad cases as a quality dashboard."""
+    team_context = current_team_context()
     render_app_header(
         "反馈记录",
         "集中查看用户反馈、负面样本和 Bad Case，用于持续优化检索与回答质量。",
@@ -2437,8 +2627,8 @@ def render_feedback_records_page() -> None:
     if not require_feedback_admin_password():
         return
 
-    feedback_rows = list_feedback_records()
-    bad_case_rows = list_bad_cases()
+    feedback_rows = list_feedback_records(team_id=int(team_context["team_id"]))
+    bad_case_rows = list_bad_cases(team_id=int(team_context["team_id"]))
     negative_count = sum(1 for row in feedback_rows if int(row.get("is_negative") or 0))
     unsupported_count = sum(1 for row in feedback_rows if row.get("feedback_type") == "引用不支持答案")
     hallucination_count = sum(1 for row in feedback_rows if row.get("feedback_type") == "模型编造")
@@ -3369,10 +3559,579 @@ def render_auth_page() -> None:
 
 
 
+def job_badge_type(status: str) -> str:
+    """Map job status to a badge type."""
+    if status == "succeeded":
+        return "success"
+    if status == "failed":
+        return "danger"
+    if status == "running":
+        return "warning"
+    if status == "canceled":
+        return "default"
+    return "info"
+
+
+def render_jobs_panel(team_id: int, paper_id: str | None = None) -> None:
+    """Render recent background jobs."""
+    can_edit = can_write(current_team_context()["role"])
+    jobs = list_jobs(current_user_id(), team_id, paper_id=paper_id, limit=20)
+    if not jobs:
+        st.caption("暂无后台任务。")
+        return
+    for job in jobs:
+        with st.expander(f"#{job['job_id']} · {job['job_type']} · {job['status']}", expanded=job["status"] in {"running", "failed"}):
+            st.markdown(render_status_badge(str(job["status"]), job_badge_type(str(job["status"]))), unsafe_allow_html=True)
+            st.write("论文：", job.get("file_name") or job.get("paper_id") or "未关联")
+            st.write("创建人：", job.get("username") or job.get("user_id") or "未知")
+            st.caption(f"创建：{job.get('created_at')} · 更新：{job.get('updated_at')} · 尝试：{job.get('attempt_count')}/{job.get('max_attempts')}")
+            if job.get("error_message"):
+                st.code(str(job["error_message"]), language="text")
+            action_cols = st.columns(2)
+            with action_cols[0]:
+                if st.button("重试", key=f"retry_job_{job['job_id']}", disabled=not can_edit or job["status"] not in {"failed", "canceled"}, use_container_width=True):
+                    try:
+                        retry_job(current_user_id(), int(job["job_id"]))
+                        st.rerun()
+                    except Exception as exc:
+                        render_error_card("重试任务失败", str(exc) or "请检查权限。")
+            with action_cols[1]:
+                if st.button("取消", key=f"cancel_job_{job['job_id']}", disabled=not can_edit or job["status"] not in {"queued", "running"}, use_container_width=True):
+                    try:
+                        cancel_job(current_user_id(), int(job["job_id"]))
+                        st.rerun()
+                    except Exception as exc:
+                        render_error_card("取消任务失败", str(exc) or "请检查权限。")
+
+
+def load_paper_into_workspace(paper: dict[str, Any], signature: str | None = None) -> dict[str, Any]:
+    """Load a persisted paper into the current workspace session."""
+    processed_pdf = paper_to_processed_pdf(paper)
+    if signature:
+        processed_pdf["signature"] = signature
+    st.session_state["processed_pdf"] = processed_pdf
+    return processed_pdf
+
+
+def enqueue_uploaded_pdf_parse(
+    uploaded_file: UploadedFile,
+    team_id: int,
+    project_id: int | None,
+    signature: str | None = None,
+) -> dict[str, Any]:
+    """Save an uploaded PDF, add it to the library, and enqueue parse plus auto-index."""
+    file_bytes = uploaded_file.getvalue()
+    digest = file_sha256(file_bytes)
+    existing_paper = find_team_paper_by_hash(
+        team_id,
+        digest,
+        statuses=("succeeded", "running", "queued", "failed"),
+    )
+    if existing_paper:
+        return {
+            "paper": existing_paper,
+            "job_id": None,
+            "reused": True,
+            "signature": signature,
+            "message": "团队中已经存在相同 PDF，已打开已有论文或后台任务，未重复创建 MinerU 解析任务。",
+        }
+
+    saved_file = save_uploaded_pdf(uploaded_file)
+    save_paper_and_chunks(
+        {
+            "paper_id": saved_file["paper_id"],
+            "file_name": saved_file["file_name"],
+            "file_size_bytes": saved_file["file_size_bytes"],
+            "save_path": saved_file["save_path"],
+            "owner_user_id": current_user_id(),
+            "team_id": team_id,
+            "project_id": project_id,
+            "file_sha256": saved_file.get("file_sha256", digest),
+            "parse_status": "queued",
+            "index_status": "queued",
+            "translation_status": "not_started",
+            "page_count": 0,
+            "total_chars": 0,
+        },
+        [],
+    )
+    job_id = enqueue_job(
+        "parse",
+        user_id=current_user_id(),
+        team_id=team_id,
+        project_id=project_id,
+        paper_id=saved_file["paper_id"],
+        payload={
+            "paper_id": saved_file["paper_id"],
+            "save_path": saved_file["save_path"],
+            "auto_index": True,
+        },
+    )
+    paper = get_accessible_paper(saved_file["paper_id"], current_user_id())
+    return {
+        "paper": paper,
+        "job_id": job_id,
+        "reused": False,
+        "signature": signature,
+        "message": f"已自动开始解析任务：#{job_id}。解析完成后 worker 会自动构建索引。",
+    }
+
+
+def current_parse_status(processed_pdf: dict[str, Any] | None) -> str:
+    """Return the current parse status for workflow and gating UI."""
+    if not processed_pdf:
+        return "not_started"
+    status = str(processed_pdf.get("parse_status") or "").strip()
+    if status:
+        return status
+    parsed_pdf = processed_pdf.get("parsed_pdf") or {}
+    if processed_pdf.get("chunks") or parsed_pdf.get("markdown_path"):
+        return "succeeded"
+    return "unknown"
+
+
+def render_parse_progress_panel(processed_pdf: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Show the current paper in the workspace until parsing has completed."""
+    paper_id = str(processed_pdf.get("saved_file", {}).get("paper_id") or "")
+    if not paper_id:
+        return processed_pdf, False
+
+    try:
+        paper = get_accessible_paper(paper_id, current_user_id())
+    except Exception as exc:
+        render_error_card("当前论文读取失败", "请检查团队权限和数据库状态。", str(exc))
+        return processed_pdf, False
+
+    if not paper:
+        render_error_card("当前论文不可访问", "这篇论文不存在，或当前用户没有访问权限。")
+        st.session_state.pop("processed_pdf", None)
+        return processed_pdf, False
+
+    refreshed_pdf = load_paper_into_workspace(paper, signature=processed_pdf.get("signature"))
+    parse_status = current_parse_status(refreshed_pdf)
+    if parse_status == "succeeded":
+        return refreshed_pdf, True
+
+    saved_file = refreshed_pdf.get("saved_file", {})
+    status_type = "danger" if parse_status == "failed" else "warning" if parse_status in {"queued", "running"} else "default"
+    st.markdown(
+        (
+            '<div class="pm-panel">'
+            '<h3 class="pm-section-title">当前论文已进入工作台</h3>'
+            '<p class="pm-section-description">论文已经保存到论文库，并绑定到当前工作台。后台会先解析 PDF，再自动构建索引；完成后可直接在这里继续阅读、问答和生成卡片。</p>'
+            '<div class="pm-file-capsule">'
+            '<div><strong>{file_name}</strong>'
+            '<div class="pm-card-meta">{file_size} · paper_id: {paper_id}</div></div>'
+            '<div class="pm-badges">{parse_badge}{index_badge}</div>'
+            '</div>'
+            '</div>'
+        ).format(
+            file_name=html.escape(str(saved_file.get("file_name") or "未命名论文")),
+            file_size=html.escape(str(saved_file.get("file_size") or "")),
+            paper_id=html.escape(paper_id),
+            parse_badge=render_status_badge(f"解析 {parse_status}", status_type),
+            index_badge=render_status_badge(f"索引 {refreshed_pdf.get('index_status') or 'unknown'}", "default"),
+        ),
+        unsafe_allow_html=True,
+    )
+    render_jobs_panel(int(paper["team_id"]), paper_id=paper_id)
+    action_cols = st.columns([0.5, 0.5], gap="small")
+    with action_cols[0]:
+        if st.button("刷新解析结果", type="primary", use_container_width=True, key=f"refresh_parse_{paper_id}"):
+            st.rerun()
+    with action_cols[1]:
+        if st.button("打开论文库", use_container_width=True, key=f"open_library_from_pending_{paper_id}"):
+            navigate_to_page("📚 论文库")
+    if parse_status == "failed":
+        st.warning("解析任务失败。请在上方任务面板查看错误信息，修复配置或网络问题后点击“重试”。")
+    else:
+        st.info("请保持 worker 运行并耐心等待。解析成功后会继续自动构建索引，点击刷新即可查看最新状态。")
+    return refreshed_pdf, False
+
+
+def dataframe_selected_rows(key: str) -> list[int]:
+    """Read selected row indices from a Streamlit dataframe widget state."""
+    state = st.session_state.get(key)
+    if state is None:
+        return []
+    try:
+        return [int(row) for row in state.selection.rows]
+    except AttributeError:
+        if isinstance(state, dict):
+            return [int(row) for row in state.get("selection", {}).get("rows", [])]
+    return []
+
+
+@st.dialog("删除论文")
+def render_delete_papers_dialog(team_id: int, paper_ids: list[str], file_names: list[str]) -> None:
+    """Confirm and delete selected papers."""
+    clean_ids = [str(paper_id) for paper_id in paper_ids if str(paper_id)]
+    if not clean_ids:
+        st.info("请先选择要删除的论文。")
+        return
+
+    count = len(clean_ids)
+    dialog_key = hashlib.sha1("|".join(clean_ids).encode("utf-8")).hexdigest()[:12]
+    st.warning("删除后会移出论文库，并清理对应 chunks、文献卡片、后台任务记录和本地 PDF/Markdown/BM25 文件。该操作不可恢复。")
+    for name in file_names[:8]:
+        st.write(f"- {name}")
+    if len(file_names) > 8:
+        st.caption(f"另有 {len(file_names) - 8} 篇未显示。")
+
+    confirmed = st.checkbox(f"确认删除选中的 {count} 篇论文", key=f"confirm_delete_papers_{dialog_key}")
+    action_cols = st.columns(2)
+    with action_cols[0]:
+        if st.button(
+            "确认删除",
+            type="primary",
+            use_container_width=True,
+            disabled=not confirmed,
+            key=f"confirm_delete_button_{dialog_key}",
+        ):
+            try:
+                result = delete_team_papers(current_user_id(), team_id, clean_ids, delete_files=True)
+                current_paper_id = str((st.session_state.get("processed_pdf") or {}).get("saved_file", {}).get("paper_id") or "")
+                if current_paper_id in clean_ids:
+                    st.session_state.pop("processed_pdf", None)
+                st.session_state.pop("paper_library_selected_paper_id", None)
+                st.toast(f"已删除 {result['deleted']} 篇论文。")
+                if result.get("file_errors"):
+                    st.warning("部分本地文件清理失败或被跳过：\n" + "\n".join(result["file_errors"][:8]))
+                st.rerun()
+            except Exception as exc:
+                logger.exception("Paper deletion failed.")
+                render_error_card("删除失败", "请检查团队权限和 SQLite 写入权限。", str(exc))
+    with action_cols[1]:
+        if st.button("取消", use_container_width=True, key=f"cancel_delete_button_{dialog_key}"):
+            st.rerun()
+
+
+def render_paper_library_page() -> None:
+    """Render the team-scoped paper library."""
+    team_context = current_team_context()
+    team_id = int(team_context["team_id"])
+    can_edit = can_write(team_context["role"])
+    render_app_header(
+        "论文库",
+        "查看当前团队可访问的所有论文，按项目和状态筛选，并打开历史论文继续阅读。",
+        [
+            render_status_badge(str(team_context["team"]["name"]), "primary"),
+            render_status_badge(f"角色 {team_context['role']}", "info"),
+        ],
+    )
+    projects = team_context["projects"]
+    project_options = [0, *[int(project["project_id"]) for project in projects]]
+    filter_cols = st.columns([0.24, 0.20, 0.20, 0.36], gap="small")
+    with filter_cols[0]:
+        project_filter = st.selectbox(
+            "项目",
+            project_options,
+            format_func=lambda value: "全部项目" if int(value) == 0 else next(project["name"] for project in projects if int(project["project_id"]) == int(value)),
+        )
+    with filter_cols[1]:
+        parse_filter = st.selectbox("解析状态", ["全部", "queued", "running", "succeeded", "failed"])
+    with filter_cols[2]:
+        index_filter = st.selectbox("索引状态", ["全部", "unknown", "running", "succeeded", "failed", "partial"])
+    with filter_cols[3]:
+        search_query = st.text_input("搜索论文", placeholder="文件名或 paper_id")
+
+    if can_edit and projects:
+        with st.expander("添加论文到论文库", expanded=False):
+            upload_project_id = st.selectbox(
+                "保存到项目",
+                options=[int(project["project_id"]) for project in projects],
+                index=max(
+                    0,
+                    next(
+                        (
+                            index
+                            for index, project in enumerate(projects)
+                            if int(project["project_id"]) == int(team_context["project_id"])
+                        ),
+                        0,
+                    ),
+                ),
+                format_func=lambda value: next(project["name"] for project in projects if int(project["project_id"]) == int(value)),
+                key="paper_library_upload_project_id",
+            )
+            library_uploads = st.file_uploader(
+                "批量选择 PDF",
+                type=["pdf"],
+                accept_multiple_files=True,
+                key="paper_library_batch_uploads",
+            )
+            if st.button(
+                "添加并自动解析/索引",
+                type="primary",
+                use_container_width=True,
+                disabled=not library_uploads,
+                key="paper_library_batch_upload_button",
+            ):
+                created = 0
+                reused = 0
+                errors: list[str] = []
+                with st.spinner("正在保存 PDF 并创建自动解析与索引任务，请耐心等待..."):
+                    for upload in library_uploads or []:
+                        try:
+                            result = enqueue_uploaded_pdf_parse(upload, team_id, int(upload_project_id))
+                            if result.get("reused"):
+                                reused += 1
+                            else:
+                                created += 1
+                        except Exception as exc:
+                            logger.exception("Paper library batch upload failed.")
+                            errors.append(f"{upload.name}: {exc}")
+                if errors:
+                    render_error_card("部分论文添加失败", "请检查文件、权限、SQLite 状态或解析配置。", "\n".join(errors[:8]))
+                else:
+                    st.success(f"已添加 {created} 篇论文；复用已有论文/任务 {reused} 篇。worker 会自动解析并构建索引。")
+                    st.rerun()
+    elif can_edit:
+        st.info("当前团队还没有项目，请先在团队管理中创建项目后再批量添加论文。")
+    else:
+        st.info("当前角色为 viewer，只能查看论文库，不能批量添加或删除。")
+
+    papers = list_accessible_papers(
+        current_user_id(),
+        team_id=team_id,
+        project_id=None if int(project_filter) == 0 else int(project_filter),
+        parse_status=None if parse_filter == "全部" else parse_filter,
+        index_status=None if index_filter == "全部" else index_filter,
+        search_query=search_query,
+    )
+    metric_cols = st.columns(4)
+    with metric_cols[0]:
+        render_metric_card("论文数", len(papers), "当前筛选结果", icon="P")
+    with metric_cols[1]:
+        render_metric_card("已解析", sum(1 for paper in papers if paper.get("parse_status") == "succeeded"), "可打开阅读", icon="MD")
+    with metric_cols[2]:
+        render_metric_card("已索引", sum(1 for paper in papers if paper.get("index_status") == "succeeded"), "可进行问答", icon="R")
+    with metric_cols[3]:
+        render_metric_card("任务中", sum(1 for paper in papers if paper.get("parse_status") in {"queued", "running"} or paper.get("index_status") == "running"), "后台处理", icon="J")
+
+    if not papers:
+        render_empty_state("当前没有论文", "在论文工作台上传 PDF 后，解析任务和历史论文会显示在这里。", "去论文工作台", icon="PDF")
+        if st.button("去论文工作台", type="primary", use_container_width=True):
+            navigate_to_page("📄 论文工作台")
+        return
+
+    table_rows = [
+        {
+            "文件名": paper["file_name"],
+            "PDF": "点击行预览",
+            "项目": paper.get("project_name") or "未分组",
+            "上传人": paper.get("owner_username") or "未知",
+            "解析": paper.get("parse_status"),
+            "索引": paper.get("index_status"),
+            "翻译": paper.get("translation_status"),
+            "Chunks": paper.get("chunk_count"),
+            "更新": paper.get("updated_at"),
+        }
+        for paper in papers
+    ]
+    toolbar_cols = st.columns([0.24, 0.52, 0.24], gap="small")
+    with toolbar_cols[0]:
+        multi_select_enabled = st.toggle(
+            "多选",
+            value=False,
+            key="paper_library_multi_select",
+            disabled=not can_edit,
+            help="开启后可以一次选择多篇论文；关闭时为单篇选择。",
+        )
+    table_key = "paper_library_table_multi" if multi_select_enabled else "paper_library_table_single"
+    selection_mode = "multi-row" if multi_select_enabled else "single-row"
+    selected_rows_before = dataframe_selected_rows(table_key)
+    selected_paper_ids_before = [
+        str(papers[row_index]["paper_id"])
+        for row_index in selected_rows_before
+        if 0 <= row_index < len(papers)
+    ]
+    selected_file_names_before = [
+        str(papers[row_index].get("file_name") or papers[row_index]["paper_id"])
+        for row_index in selected_rows_before
+        if 0 <= row_index < len(papers)
+    ]
+    with toolbar_cols[1]:
+        selected_count = len(selected_paper_ids_before)
+        st.caption(
+            f"已选 {selected_count} 篇；点击行可预览 PDF，解析完成后可打开到工作台。"
+            if selected_count
+            else "点击行可预览 PDF；开启多选后可批量选择论文。"
+        )
+    with toolbar_cols[2]:
+        if st.button(
+            "删除选中论文",
+            type="primary",
+            use_container_width=True,
+            disabled=not can_edit or not selected_paper_ids_before,
+            key="delete_selected_papers_toolbar",
+        ):
+            render_delete_papers_dialog(team_id, selected_paper_ids_before, selected_file_names_before)
+
+    table_state = st.dataframe(
+        table_rows,
+        use_container_width=True,
+        hide_index=True,
+        key=table_key,
+        on_select="rerun",
+        selection_mode=selection_mode,
+        column_config={
+            "PDF": st.column_config.TextColumn("PDF", help="点击论文行后，下方会预览第一篇选中论文的原始 PDF。"),
+        },
+    )
+    selected_rows = []
+    try:
+        selected_rows = [int(row) for row in table_state.selection.rows]
+    except AttributeError:
+        if isinstance(table_state, dict):
+            selected_rows = [int(row) for row in table_state.get("selection", {}).get("rows", [])]
+
+    selected_paper: dict[str, Any] | None = None
+    selected_paper_ids = [
+        str(papers[int(row_index)]["paper_id"])
+        for row_index in selected_rows
+        if 0 <= int(row_index) < len(papers)
+    ]
+    if selected_rows:
+        row_index = int(selected_rows[0])
+        if 0 <= row_index < len(papers):
+            selected_paper = papers[row_index]
+            st.session_state["paper_library_selected_paper_id"] = str(selected_paper["paper_id"])
+    else:
+        remembered_id = st.session_state.get("paper_library_selected_paper_id")
+        if remembered_id:
+            selected_paper = next((paper for paper in papers if str(paper["paper_id"]) == str(remembered_id)), None)
+
+    if selected_paper is None:
+        st.info("点击表格中的论文行，可直接在下方预览原始 PDF；owner/admin/editor 可开启多选后批量删除。解析完成后也可以打开到论文工作台继续阅读和问答。")
+        if st.button("刷新论文库", use_container_width=True):
+            st.rerun()
+        return
+
+    selected_paper_id = str(selected_paper["paper_id"])
+    st.caption(
+        f"当前选择：{selected_paper.get('file_name')} · {selected_paper.get('parse_status')} · {selected_paper.get('project_name') or '未分组'}"
+        + (f" · 已选 {len(selected_paper_ids)} 篇" if selected_paper_ids else "")
+    )
+    open_cols = st.columns([0.45, 0.55], gap="small")
+    with open_cols[0]:
+        if st.button("打开到论文工作台", type="primary", use_container_width=True):
+            if selected_paper.get("parse_status") != "succeeded":
+                st.warning("这篇论文还没有解析完成，请等待 worker 完成解析任务。")
+            else:
+                fresh_paper = get_accessible_paper(selected_paper_id, current_user_id())
+                if not fresh_paper:
+                    render_error_card("无法打开论文", "当前用户没有访问这篇论文的权限。")
+                    return
+                load_paper_into_workspace(fresh_paper)
+                navigate_to_page("📄 论文工作台")
+    with open_cols[1]:
+        if st.button("刷新论文库", use_container_width=True):
+            st.rerun()
+    st.markdown("#### 原始 PDF")
+    render_pdf_viewer(selected_paper.get("save_path"))
+    with st.expander("当前论文任务", expanded=False):
+        render_jobs_panel(team_id, paper_id=selected_paper_id)
+
+
+def render_team_management_page() -> None:
+    """Render team and project administration."""
+    team_context = current_team_context()
+    team_id = int(team_context["team_id"])
+    role = team_context["role"]
+    render_app_header(
+        "团队管理",
+        "管理团队、项目和成员角色。owner/admin 可添加成员和创建项目。",
+        [render_status_badge(f"当前角色 {role}", "warning" if can_manage_team(role) else "default")],
+    )
+    if not can_manage_team(role):
+        render_empty_state("没有团队管理权限", "只有 owner 和 admin 可以管理团队成员和项目。", icon="TEAM")
+        return
+
+    section_cols = st.columns([0.48, 0.52], gap="large")
+    with section_cols[0]:
+        render_section_card("团队", "创建新团队，或在侧边栏切换当前团队。")
+        with st.form("create_team_form"):
+            team_name = st.text_input("新团队名称", placeholder="例如：视觉组、毕业论文小组")
+            submitted = st.form_submit_button("创建团队", type="primary", use_container_width=True)
+        if submitted:
+            try:
+                team = create_team(current_user_id(), team_name)
+                st.session_state["current_team_id"] = int(team["team_id"])
+                st.success("团队已创建。")
+                st.rerun()
+            except Exception as exc:
+                render_error_card("团队创建失败", str(exc) or "请检查输入。")
+
+        render_section_card("项目", "项目用于把同一团队下的论文分组。")
+        projects = list_projects(current_user_id(), team_id)
+        st.dataframe([{"项目 ID": project["project_id"], "名称": project["name"], "创建时间": project["created_at"]} for project in projects], use_container_width=True, hide_index=True)
+        with st.form("create_project_form"):
+            project_name = st.text_input("新项目名称", placeholder="例如：RAG 必读、论文综述")
+            submitted = st.form_submit_button("创建项目", type="primary", use_container_width=True)
+        if submitted:
+            try:
+                create_project(current_user_id(), team_id, project_name)
+                st.success("项目已创建。")
+                st.rerun()
+            except Exception as exc:
+                render_error_card("项目创建失败", str(exc) or "请检查输入。")
+
+    with section_cols[1]:
+        render_section_card("成员", "按已有用户名添加成员，并设置 viewer/editor/admin 角色。")
+        members = list_team_members(current_user_id(), team_id)
+        st.dataframe([{"用户 ID": member["user_id"], "用户名": member["username"], "角色": member["role"], "加入时间": member["created_at"]} for member in members], use_container_width=True, hide_index=True)
+        with st.form("add_team_member_form"):
+            username = st.text_input("已有用户名")
+            role_value = st.selectbox("角色", ["viewer", "editor", "admin"])
+            submitted = st.form_submit_button("添加或更新成员", type="primary", use_container_width=True)
+        if submitted:
+            try:
+                add_team_member_by_username(current_user_id(), team_id, username, role_value)
+                st.success("团队成员已更新。")
+                st.rerun()
+            except Exception as exc:
+                render_error_card("成员添加失败", str(exc) or "请检查用户名。")
+
+        editable_members = [member for member in members if member["role"] != "owner" and int(member["user_id"]) != current_user_id()]
+        if editable_members:
+            with st.expander("修改或移除成员", expanded=False):
+                target_user_id = st.selectbox(
+                    "成员",
+                    options=[int(member["user_id"]) for member in editable_members],
+                    format_func=lambda value: next(member["username"] for member in editable_members if int(member["user_id"]) == int(value)),
+                )
+                new_role = st.selectbox("新角色", ["viewer", "editor", "admin"], key="team_member_new_role")
+                action_cols = st.columns(2)
+                with action_cols[0]:
+                    if st.button("保存角色", use_container_width=True):
+                        update_team_member_role(current_user_id(), team_id, int(target_user_id), new_role)
+                        st.rerun()
+                with action_cols[1]:
+                    if st.button("移除成员", use_container_width=True):
+                        remove_team_member(current_user_id(), team_id, int(target_user_id))
+                        st.rerun()
+
+
 def render_workspace_page() -> None:
     """Render a tidy paper workspace page."""
+    team_context = current_team_context()
+    team_id = int(team_context["team_id"])
+    project_id = team_context.get("project_id")
+    can_edit = can_write(team_context["role"])
     processed_pdf: dict[str, Any] | None = st.session_state.get("processed_pdf")
     paper_id = str((processed_pdf or {}).get("saved_file", {}).get("paper_id") or "")
+    if processed_pdf and paper_id:
+        try:
+            latest_paper = get_accessible_paper(paper_id, current_user_id())
+            if latest_paper:
+                processed_pdf = load_paper_into_workspace(latest_paper, signature=processed_pdf.get("signature"))
+                paper_id = str(processed_pdf.get("saved_file", {}).get("paper_id") or "")
+        except Exception:
+            logger.exception("Workspace paper refresh failed. paper_id=%s", paper_id)
+    parse_status = current_parse_status(processed_pdf)
+    paper_open = bool(processed_pdf)
+    parse_done = parse_status == "succeeded"
     index_state = local_index_state(paper_id) if paper_id else {"vector": "未知", "bm25": "未知"}
     index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
     qa_done = bool(paper_id and st.session_state.get(f"last_qa_{paper_id}"))
@@ -3389,9 +4148,9 @@ def render_workspace_page() -> None:
     )
     render_workflow_steps(
         [
-            {"title": "上传 PDF", "helper": "选择论文文件", "status": "done" if processed_pdf else "active"},
-            {"title": "解析正文", "helper": "Markdown 与图片", "status": "done" if processed_pdf else "pending"},
-            {"title": "构建索引", "helper": "Chroma + BM25", "status": "done" if index_ready else ("active" if processed_pdf else "pending")},
+            {"title": "上传 PDF", "helper": "选择论文文件", "status": "done" if paper_open else "active"},
+            {"title": "解析正文", "helper": "Markdown 与图片", "status": "done" if parse_done else ("active" if paper_open else "pending")},
+            {"title": "构建索引", "helper": "Chroma + BM25", "status": "done" if index_ready else ("active" if parse_done else "pending")},
             {"title": "开始问答", "helper": "基于原文引用", "status": "done" if qa_done else ("active" if index_ready else "pending")},
             {"title": "生成卡片", "helper": "沉淀研究笔记", "status": "done" if card_done else ("active" if qa_done else "pending")},
         ]
@@ -3403,7 +4162,7 @@ def render_workspace_page() -> None:
     with metric_cols[0]:
         render_metric_card("当前论文", saved_file.get("file_name") or "未上传", "上传 PDF 后开始解析", icon="PDF")
     with metric_cols[1]:
-        render_metric_card("解析状态", "已完成" if processed_pdf else "未开始", "正文、图片与页码", icon="MD", status="success" if processed_pdf else "warning")
+        render_metric_card("解析状态", parse_status, "正文、图片与页码", icon="MD", status="success" if parse_done else "warning")
     with metric_cols[2]:
         render_metric_card("Chunk 数量", len(chunks), "用于检索的论文片段", icon="CH")
     with metric_cols[3]:
@@ -3411,17 +4170,21 @@ def render_workspace_page() -> None:
     with metric_cols[4]:
         render_metric_card("BM25 状态", index_state["bm25"], "关键词精确检索", icon="B", status=index_status_type(index_state["bm25"]))
 
-    render_section_card("上传与解析", "拖拽或选择一篇 PDF。解析完成后可下载 Markdown 和图片，并继续构建检索索引。")
-    uploaded_file = st.file_uploader("选择一篇 PDF 论文", type=["pdf"], accept_multiple_files=False)
+    render_section_card("上传与解析", "拖拽或选择一篇 PDF。论文会立即进入论文库，并绑定到当前工作台；worker 完成解析后可直接在这里继续阅读、索引、问答和生成卡片。")
+    workspace_notice = st.session_state.pop("pm_workspace_notice", None)
+    if workspace_notice:
+        st.success(str(workspace_notice))
+    if not can_edit:
+        st.info("当前团队角色为 viewer，只能阅读论文库中的已有论文，不能上传或创建任务。")
+        uploaded_file = None
+    else:
+        uploaded_file = st.file_uploader("选择一篇 PDF 论文", type=["pdf"], accept_multiple_files=False)
 
     if uploaded_file is None:
         if not processed_pdf:
-            render_empty_state(
-                "还没有论文",
-                "上传一篇 PDF，PaperMate 会帮你解析正文、构建索引并开始问答。",
-                "选择 PDF 文件",
-                icon="PDF",
-            )
+            render_empty_state("还没有打开论文", "从论文库打开历史论文，或上传 PDF 创建后台解析任务。", "去论文库", icon="PDF")
+            if st.button("打开论文库", type="primary", use_container_width=True):
+                navigate_to_page("📚 论文库")
             return
         st.info("已恢复当前会话中的论文工作台内容。需要换论文时，重新上传 PDF 即可。")
     else:
@@ -3432,7 +4195,7 @@ def render_workspace_page() -> None:
             <div class="pm-file-capsule">
               <div>
                 <strong>{html.escape(uploaded_file.name)}</strong>
-                <div class="pm-card-meta">{format_file_size(len(uploaded_file.getvalue()))} · 已选择，等待本地解析</div>
+                <div class="pm-card-meta">{format_file_size(len(uploaded_file.getvalue()))} · 已选择，将自动解析并构建索引</div>
               </div>
               <div class="pm-badges">{render_status_badge("PDF", "primary")}{render_status_badge("本地保存", "success")}</div>
             </div>
@@ -3441,27 +4204,60 @@ def render_workspace_page() -> None:
         )
         if cached_pdf:
             processed_pdf = cached_pdf
-            if st.button("重新解析当前 PDF", use_container_width=True):
+            if st.button("重新自动解析当前 PDF", use_container_width=True):
                 st.session_state.pop("processed_pdf", None)
+                st.session_state.pop("pm_failed_upload_signature", None)
+                st.session_state.pop("pm_failed_upload_error", None)
                 st.rerun()
         else:
             processed_pdf = None
-            if st.button("开始解析 PDF", type="primary", use_container_width=True, key="start_pdf_parse"):
+            failed_signature = st.session_state.get("pm_failed_upload_signature")
+            if failed_signature == signature:
+                render_error_card(
+                    "PDF 自动解析任务创建失败",
+                    "上一次自动创建任务失败。请修复问题后点击重试，系统会重新保存 PDF、解析正文并在完成后自动构建索引。",
+                    str(st.session_state.get("pm_failed_upload_error") or ""),
+                )
+                if st.button("重试自动解析和索引", type="primary", use_container_width=True, key="retry_auto_parse"):
+                    st.session_state.pop("pm_failed_upload_signature", None)
+                    st.session_state.pop("pm_failed_upload_error", None)
+                    st.rerun()
+            else:
                 try:
-                    with st.spinner("正在保存 PDF 并转换为 Markdown..."):
-                        processed_pdf = process_uploaded_pdf(uploaded_file)
+                    with st.spinner("正在保存 PDF 并创建自动解析与索引任务，请耐心等待..."):
+                        result = enqueue_uploaded_pdf_parse(uploaded_file, team_id, project_id, signature=signature)
+                        paper = result.get("paper")
+                        if paper:
+                            load_paper_into_workspace(paper, signature=signature)
+                        st.session_state.pop("pm_failed_upload_signature", None)
+                        st.session_state.pop("pm_failed_upload_error", None)
+                        st.session_state["pm_workspace_notice"] = (
+                            f"{result['message']} 这通常需要一些时间，请耐心等待。"
+                        )
+                        st.rerun()
                 except (UploadError, PdfParseError, MinerUError) as exc:
                     logger.exception("PDF upload or parse failed.")
+                    st.session_state["pm_failed_upload_signature"] = signature
+                    st.session_state["pm_failed_upload_error"] = f"{exc.message} 错误码：{exc.code.value}"
                     render_error_card(
-                        "PDF 解析失败",
+                        "PDF 自动解析任务创建失败",
                         f"{exc.message} 请检查文件、解析服务配置或网络连接后重试。",
                         f"错误码：{exc.code.value}",
                     )
                     processed_pdf = None
+                except Exception as exc:
+                    logger.exception("PDF parse job enqueue failed.")
+                    st.session_state["pm_failed_upload_signature"] = signature
+                    st.session_state["pm_failed_upload_error"] = str(exc)
+                    render_error_card("PDF 自动解析任务创建失败", "请检查团队权限和 SQLite 写入权限。", str(exc))
+                    processed_pdf = None
 
     if not processed_pdf:
         return
-    if processed_pdf["db_save_failed"]:
+    processed_pdf, parse_ready = render_parse_progress_panel(processed_pdf)
+    if not parse_ready:
+        return
+    if processed_pdf.get("db_save_failed"):
         render_error_card("数据保存失败", "解析结果可以继续查看，但 RAG 和文献卡片可能无法使用。请检查 SQLite 数据库权限。")
 
     render_processed_pdf_summary(processed_pdf)
@@ -3517,6 +4313,9 @@ def render_card_visual(card: dict[str, Any]) -> None:
 
 def render_card_library_page(user_id: int) -> None:
     """Render a tidy literature-card knowledge base."""
+    team_context = current_team_context()
+    team_id = int(team_context["team_id"])
+    can_edit = can_write(team_context["role"])
     render_app_header(
         "文献卡片库",
         "沉淀论文阅读记录、方法线索、实验结论和研究灵感。",
@@ -3526,8 +4325,8 @@ def render_card_library_page(user_id: int) -> None:
         ],
     )
     try:
-        libraries = list_card_libraries(user_id)
-        all_cards = list_literature_cards(user_id=user_id)
+        libraries = list_card_libraries(user_id, team_id=team_id)
+        all_cards = list_literature_cards(team_id=team_id)
     except (OSError, sqlite3.Error) as exc:
         render_error_card("卡片库读取失败", "请检查 SQLite 数据库权限后重试。", str(exc))
         return
@@ -3543,7 +4342,7 @@ def render_card_library_page(user_id: int) -> None:
     )
     current_library_name = selected_library["name"] if selected_library else "全部卡片库"
     library_filter = None if int(selected_library_id) == 0 else int(selected_library_id)
-    cards = list_literature_cards(user_id=user_id, library_id=library_filter)
+    cards = list_literature_cards(library_id=library_filter, team_id=team_id)
 
     metric_cols = st.columns(5)
     with metric_cols[0]:
@@ -3570,7 +4369,7 @@ def render_card_library_page(user_id: int) -> None:
             key="library_filter_tidy",
         )
     library_filter = None if int(selected_library_id) == 0 else int(selected_library_id)
-    cards = list_literature_cards(user_id=user_id, library_id=library_filter)
+    cards = list_literature_cards(library_id=library_filter, team_id=team_id)
     field_options = ["全部领域", *sorted({_pm_text(card.get("research_field"), "") for card in cards if card.get("research_field")})]
     year_options = ["全部年份", *sorted({_pm_text(card.get("year"), "") for card in cards if card.get("year")}, reverse=True)]
     with top_cols[1]:
@@ -3584,8 +4383,11 @@ def render_card_library_page(user_id: int) -> None:
 
     action_cols = st.columns([0.34, 0.34, 0.32], gap="large")
     with action_cols[0]:
-        with st.expander("新建卡片库", expanded=False):
-            render_library_create_form(user_id, key_suffix="_tidy")
+        if can_edit:
+            with st.expander("新建卡片库", expanded=False):
+                render_library_create_form(user_id, key_suffix="_tidy", team_id=team_id)
+        else:
+            st.caption("只读角色不能新建卡片库。")
     with action_cols[1]:
         selected_library = (
             next((library for library in libraries if int(library["library_id"]) == int(selected_library_id)), None)
@@ -3593,8 +4395,11 @@ def render_card_library_page(user_id: int) -> None:
             else None
         )
         if selected_library:
-            with st.expander("重命名当前库", expanded=False):
-                render_library_rename_form(user_id, selected_library)
+            if can_edit:
+                with st.expander("重命名当前库", expanded=False):
+                    render_library_rename_form(user_id, selected_library, team_id=team_id)
+            else:
+                st.caption("只读角色不能重命名卡片库。")
         else:
             st.caption("选择具体卡片库后可重命名。")
     with action_cols[2]:
@@ -3607,9 +4412,9 @@ def render_card_library_page(user_id: int) -> None:
                 ),
             )
             confirm_batch_delete = st.checkbox("确认删除，操作不可撤销")
-            if st.button("确认批量删除", disabled=not selected_batch_ids or not confirm_batch_delete, use_container_width=True):
+            if st.button("确认批量删除", disabled=not can_edit or not selected_batch_ids or not confirm_batch_delete, use_container_width=True):
                 try:
-                    deleted_count = delete_literature_cards(selected_batch_ids, user_id=user_id)
+                    deleted_count = delete_literature_cards(selected_batch_ids, user_id=None, team_id=team_id)
                 except (OSError, sqlite3.Error) as exc:
                     render_error_card("批量删除失败", "请检查 SQLite 数据库权限。", str(exc))
                     return
@@ -3642,8 +4447,7 @@ def render_card_library_page(user_id: int) -> None:
             icon="CARD",
         )
         if st.button("去论文工作台", type="primary", use_container_width=True):
-            st.session_state["pm_nav_page"] = "📄 论文工作台"
-            st.rerun()
+            navigate_to_page("📄 论文工作台")
         return
 
     if "selected_literature_card_id_tidy" not in st.session_state or not any(
@@ -3665,7 +4469,7 @@ def render_card_library_page(user_id: int) -> None:
         for card in cards:
             render_literature_card(card, selected=int(card["card_id"]) == int(selected_card_id))
     with detail_col:
-        selected_card = get_literature_card(int(selected_card_id), user_id=user_id)
+        selected_card = get_literature_card(int(selected_card_id), team_id=team_id)
         if not selected_card:
             render_empty_state("没有找到选中的卡片", "请重新选择一张文献卡片。", icon="CARD")
             return
@@ -3675,10 +4479,13 @@ def render_card_library_page(user_id: int) -> None:
             with st.expander("Markdown 原文", expanded=False):
                 st.text_area("Markdown", selected_card["markdown"], height=320, key=f"card_markdown_tidy_{selected_card['card_id']}")
         with tab_edit:
-            render_literature_detail(selected_card, mode="edit")
-            render_card_edit_form(selected_card, user_id)
-            st.divider()
-            render_card_delete(int(selected_card["card_id"]), user_id)
+            if can_edit:
+                render_literature_detail(selected_card, mode="edit")
+                render_card_edit_form(selected_card, user_id=None, team_id=team_id)
+                st.divider()
+                render_card_delete(int(selected_card["card_id"]), user_id=None, team_id=team_id)
+            else:
+                render_empty_state("只读角色不能编辑卡片", "当前团队角色为 viewer，只能查看文献卡片。", icon="CARD")
         with tab_pdf:
             render_pdf_viewer(selected_card.get("save_path"))
 
@@ -3759,7 +4566,7 @@ def render_literature_detail(card: dict[str, Any], mode: str = "preview") -> Non
 
 
 def render_processed_pdf_summary(processed_pdf: dict[str, Any]) -> None:
-    """Render uploaded-file metadata, Markdown downloads, and translation action."""
+    """Render uploaded-file metadata."""
     saved_file = processed_pdf["saved_file"]
     parsed_pdf = processed_pdf["parsed_pdf"]
     zh_path = parsed_translated_markdown_path(parsed_pdf)
@@ -3792,14 +4599,14 @@ def render_processed_pdf_summary(processed_pdf: dict[str, Any]) -> None:
         ),
         unsafe_allow_html=True,
     )
-    render_translation_controls(processed_pdf)
-    render_extracted_images(parsed_pdf.get("images", []))
 
 
 
 
 def render_translation_controls(processed_pdf: dict[str, Any]) -> None:
     """Render Markdown translation action, progress, and downloads."""
+    team_context = current_team_context()
+    can_edit = can_write(team_context["role"])
     parsed_pdf = processed_pdf["parsed_pdf"]
     markdown_path_text = parsed_pdf.get("markdown_path")
     if not markdown_path_text:
@@ -3821,60 +4628,38 @@ def render_translation_controls(processed_pdf: dict[str, Any]) -> None:
                 type="primary" if not zh_exists else "secondary",
                 use_container_width=True,
                 key=f"translate_markdown_{processed_pdf['saved_file']['paper_id']}",
+                disabled=not can_edit,
             ):
-                progress_bar = st.progress(0, text="准备翻译 Markdown...")
-                status_box = st.empty()
-
-                def update_translation_progress(completed: int, total: int, status: str) -> None:
-                    safe_total = max(total, 1)
-                    safe_completed = max(0, min(completed, safe_total))
-                    current = min(safe_completed + 1, safe_total)
-                    if status == "start":
-                        message = f"已切分为 {safe_total} 个片段，开始翻译。"
-                    elif status == "cached":
-                        message = f"正在复用已翻译缓存：第 {current}/{safe_total} 个片段。"
-                    elif status == "translating":
-                        message = f"正在翻译第 {current}/{safe_total} 个片段，请保持页面打开。"
-                    elif status == "translated":
-                        message = f"已完成 {safe_completed}/{safe_total} 个片段。"
-                    elif status == "done":
-                        message = f"翻译完成，共 {safe_total} 个片段。"
-                        safe_completed = safe_total
-                    elif status == "exists":
-                        message = "已存在中文 Markdown，直接使用现有译文。"
-                        safe_completed = safe_total
-                    else:
-                        message = f"正在处理 Markdown：{safe_completed}/{safe_total}"
-                    progress_bar.progress(safe_completed / safe_total, text=message)
-                    status_box.caption(message)
-
                 try:
-                    with st.spinner("正在翻译 Markdown，长论文会按片段逐步处理..."):
-                        translated_path = translate_markdown_to_chinese(
-                            input_md_path=str(markdown_path),
-                            output_md_path=str(zh_path),
-                            model=settings.translation_model,
-                            chunk_size=settings.translation_chunk_size,
-                            force=zh_exists,
-                            progress_callback=update_translation_progress,
-                            timeout=settings.translation_timeout,
-                        )
-                    parsed_pdf["translated_markdown_path"] = translated_path
-                    progress_bar.progress(1.0, text="中文 Markdown 已生成。")
-                    status_box.success("中文 Markdown 已生成，可在阅读器中切换查看。")
-                    st.toast("中文 Markdown 已生成。")
-                    st.rerun()
+                    job_id = enqueue_job(
+                        "translate",
+                        user_id=current_user_id(),
+                        team_id=int(team_context["team_id"]),
+                        project_id=team_context.get("project_id"),
+                        paper_id=processed_pdf["saved_file"]["paper_id"],
+                        payload={
+                            "paper_id": processed_pdf["saved_file"]["paper_id"],
+                            "input_md_path": str(markdown_path),
+                            "output_md_path": str(zh_path),
+                            "force": bool(zh_exists),
+                        },
+                    )
+                    update_paper_status(processed_pdf["saved_file"]["paper_id"], translation_status="running")
+                    st.success(f"翻译任务已入队：#{job_id}。worker 完成后可下载中文 Markdown。")
                 except Exception as exc:
                     logger.exception("Markdown translation failed.")
                     render_error_card(
-                        "中文 Markdown 翻译失败",
-                        "请检查翻译模型配置、API Key、网络连接或稍后重试。",
+                        "中文 Markdown 翻译任务创建失败",
+                        "请检查团队权限和 SQLite 写入权限。",
                         str(exc),
                     )
         with translate_cols[1]:
             st.caption(
                 f"模型：{settings.translation_model} · 分块：{settings.translation_chunk_size} 字符 · 超时：{settings.translation_timeout} 秒/片段"
             )
+            latest_translate_job = latest_job_for_paper(int(team_context["team_id"]), processed_pdf["saved_file"]["paper_id"], "translate")
+            if latest_translate_job:
+                st.caption(f"最近翻译任务：#{latest_translate_job['job_id']} · {latest_translate_job['status']}")
 
     download_cols = st.columns(2, gap="small")
     with download_cols[0]:
@@ -3952,6 +4737,8 @@ def render_reader_translation_button(
     zh_exists: bool,
 ) -> None:
     """Render the reader-level translation action."""
+    team_context = current_team_context()
+    can_edit = can_write(team_context["role"])
     if not settings.translation_enabled:
         st.button("翻译为中文 Markdown", disabled=True, use_container_width=True)
         st.caption("中文翻译功能未启用。")
@@ -3965,53 +4752,34 @@ def render_reader_translation_button(
         type="primary" if not zh_exists else "secondary",
         use_container_width=True,
         key=f"translate_markdown_reader_{paper_id}",
+        disabled=not can_edit,
     ):
+        if not can_edit:
+            st.caption("当前团队角色为只读，不能创建翻译任务。")
         return
 
-    progress_bar = st.progress(0, text="准备翻译 Markdown...")
-    status_box = st.empty()
-
-    def update_translation_progress(completed: int, total: int, status: str) -> None:
-        safe_total = max(total, 1)
-        safe_completed = max(0, min(completed, safe_total))
-        current = min(safe_completed + 1, safe_total)
-        if status == "start":
-            message = f"已切分为 {safe_total} 个片段，开始翻译。"
-        elif status == "cached":
-            message = f"正在复用已翻译缓存：第 {current}/{safe_total} 个片段。"
-        elif status == "translating":
-            message = f"正在翻译第 {current}/{safe_total} 个片段，请保持页面打开。"
-        elif status == "translated":
-            message = f"已完成 {safe_completed}/{safe_total} 个片段。"
-        elif status == "done":
-            safe_completed = safe_total
-            message = f"翻译完成，共 {safe_total} 个片段。"
-        else:
-            message = f"正在处理 Markdown：{safe_completed}/{safe_total}"
-        progress_bar.progress(safe_completed / safe_total, text=message)
-        status_box.caption(message)
-
     try:
-        with st.spinner("正在翻译 Markdown，请稍候。较长论文可能需要一些时间。"):
-            translated_path = translate_markdown_to_chinese(
-                input_md_path=str(markdown_path),
-                output_md_path=str(zh_path),
-                model=settings.translation_model,
-                chunk_size=settings.translation_chunk_size,
-                force=zh_exists,
-                progress_callback=update_translation_progress,
-                timeout=settings.translation_timeout,
-            )
-        parsed_pdf["translated_markdown_path"] = translated_path
-        st.session_state["reading_mode"] = "双语对照"
-        st.toast("中文 Markdown 已生成。")
-        st.success("中文 Markdown 已生成，可以切换到中文译文或双语对照模式。")
-        st.rerun()
+        del parsed_pdf
+        job_id = enqueue_job(
+            "translate",
+            user_id=current_user_id(),
+            team_id=int(team_context["team_id"]),
+            project_id=team_context.get("project_id"),
+            paper_id=paper_id,
+            payload={
+                "paper_id": paper_id,
+                "input_md_path": str(markdown_path),
+                "output_md_path": str(zh_path),
+                "force": bool(zh_exists),
+            },
+        )
+        update_paper_status(paper_id, translation_status="running")
+        st.success(f"翻译任务已入队：#{job_id}。worker 完成后可以切换中文译文或双语对照。")
     except Exception as exc:
         logger.exception("Markdown translation failed from reader.")
         render_error_card(
-            "中文 Markdown 翻译失败",
-            "请检查翻译模型配置、API Key、网络连接或稍后重试。",
+            "中文 Markdown 翻译任务创建失败",
+            "请检查团队权限和 SQLite 写入权限。",
             str(exc),
         )
 
@@ -4230,7 +4998,8 @@ def read_original_markdown(processed_pdf: dict[str, Any]) -> tuple[str, Path | N
             return markdown_path.read_text(encoding="utf-8"), markdown_path
         except OSError:
             logger.warning("Failed to read original Markdown from disk.", exc_info=True)
-    return parsed_pdf.get("markdown", "") or processed_pdf.get("preview", ""), markdown_path
+    chunk_markdown = chunks_to_markdown(processed_pdf.get("chunks", []))
+    return parsed_pdf.get("markdown", "") or chunk_markdown or processed_pdf.get("preview", ""), markdown_path
 
 
 def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
@@ -4381,8 +5150,12 @@ def render_app() -> None:
 
     if page == "论文工作台":
         render_workspace_page()
+    elif page == "论文库":
+        render_paper_library_page()
     elif page == "文献卡片库":
         render_card_library_page(int(user["user_id"]))
+    elif page == "团队管理":
+        render_team_management_page()
     else:
         render_feedback_records_page()
 

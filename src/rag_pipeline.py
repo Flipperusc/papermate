@@ -85,13 +85,18 @@ class RAGPipeline:
         self.context_builder = context_builder
         self.context_max_chars = settings.context_max_chars
 
-    def answer_question(self, paper_id: str, question: str) -> dict[str, Any]:
+    def answer_question(
+        self,
+        paper_id: str,
+        question: str,
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
         """Answer a question using Hybrid Retrieval + RRF."""
         start_time = time.perf_counter()
         clean_question = question.strip()
         if not clean_question:
             retrieval_debug = self._build_retrieval_debug(None, start_time)
-            qa_id = self._save_qa_log_safely(paper_id, clean_question, REFUSAL_ANSWER)
+            qa_id = self._save_qa_log_safely(paper_id, clean_question, REFUSAL_ANSWER, user_id=user_id)
             retrieval_debug["latency_ms"] = _latency_ms(start_time)
             return empty_answer(retrieval_debug=retrieval_debug, qa_id=qa_id)
 
@@ -101,7 +106,7 @@ class RAGPipeline:
             retrieval_debug = self._build_retrieval_debug(retrieval_result, start_time)
 
             if not final_results:
-                qa_id = self._save_qa_log_safely(paper_id, clean_question, REFUSAL_ANSWER)
+                qa_id = self._save_qa_log_safely(paper_id, clean_question, REFUSAL_ANSWER, user_id=user_id)
                 retrieval_debug["latency_ms"] = _latency_ms(start_time)
                 return empty_answer(retrieval_debug=retrieval_debug, qa_id=qa_id)
 
@@ -112,7 +117,7 @@ class RAGPipeline:
             retrieval_debug["context_chars"] = len(context_text)
 
             if not context_text or not citations:
-                qa_id = self._save_qa_log_safely(paper_id, clean_question, REFUSAL_ANSWER)
+                qa_id = self._save_qa_log_safely(paper_id, clean_question, REFUSAL_ANSWER, user_id=user_id)
                 retrieval_debug["latency_ms"] = _latency_ms(start_time)
                 return empty_answer(retrieval_debug=retrieval_debug, qa_id=qa_id)
 
@@ -124,7 +129,7 @@ class RAGPipeline:
                     user_message=DEEPSEEK_CALL_FAILED_MESSAGE,
                 )
 
-            qa_id = self._save_qa_log_safely(paper_id, clean_question, answer)
+            qa_id = self._save_qa_log_safely(paper_id, clean_question, answer, user_id=user_id)
             citations = _with_legacy_source_ids(citations)
             source_chunks = _build_source_chunks(final_results, citations)
             retrieval_debug["latency_ms"] = _latency_ms(start_time)
@@ -191,9 +196,15 @@ class RAGPipeline:
         debug["latency_ms"] = _latency_ms(start_time)
         return debug
 
-    def _save_qa_log_safely(self, paper_id: str, question: str, answer: str) -> int | None:
+    def _save_qa_log_safely(
+        self,
+        paper_id: str,
+        question: str,
+        answer: str,
+        user_id: int | None = None,
+    ) -> int | None:
         try:
-            return save_qa_log(paper_id, question, answer)
+            return save_qa_log(paper_id, question, answer, user_id=user_id)
         except Exception:
             logger.exception("QA log save failed inside RAG pipeline. paper_id=%s", paper_id)
             return None
@@ -257,6 +268,10 @@ def empty_answer(
     }
 
 
-def answer_question(paper_id: str, question: str) -> dict[str, Any]:
+def answer_question(
+    paper_id: str,
+    question: str,
+    user_id: int | None = None,
+) -> dict[str, Any]:
     """Answer a question for a paper using the default RAG pipeline."""
-    return RAGPipeline().answer_question(paper_id, question)
+    return RAGPipeline().answer_question(paper_id, question, user_id=user_id)
