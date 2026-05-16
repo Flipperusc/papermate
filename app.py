@@ -516,10 +516,14 @@ def current_team_context() -> dict[str, Any]:
             raise RuntimeError(f"无法创建团队工作区：{workspace}")
 
     team_ids = [int(team["team_id"]) for team in teams]
-    selected_team_id = st.session_state.get("current_team_id")
+    pending_team_id = st.session_state.pop("pending_current_team_id", None)
+    selected_team_id = pending_team_id if pending_team_id is not None else st.session_state.get("current_team_id")
+    should_sync_team_id = pending_team_id is not None
     if int(selected_team_id or 0) not in team_ids:
         selected_team_id = team_ids[0]
-        st.session_state["current_team_id"] = selected_team_id
+        should_sync_team_id = True
+    if should_sync_team_id:
+        st.session_state["current_team_id"] = int(selected_team_id)
 
     projects = list_projects(user_id, int(selected_team_id))
     project_ids = [int(project["project_id"]) for project in projects]
@@ -2160,7 +2164,7 @@ def render_index_builder(chunks: list[dict[str, Any]]) -> None:
             paper = get_accessible_paper(paper_id, current_user_id(), minimum_role="editor")
             if not paper:
                 raise PermissionError("没有找到当前论文或无权构建索引。")
-            job_id = enqueue_job(
+            enqueue_job(
                 "index",
                 user_id=current_user_id(),
                 team_id=int(paper["team_id"]),
@@ -2170,7 +2174,7 @@ def render_index_builder(chunks: list[dict[str, Any]]) -> None:
             )
             update_paper_status(paper_id, index_status="running")
             st.session_state[f"index_state_{paper_id}"] = {"vector": "构建中", "bm25": "构建中"}
-            st.success(f"索引任务已入队：#{job_id}。请运行 worker 后查看任务状态。")
+            st.success("论文已在后台排队解析中，请稍后刷新查看结果")
         except Exception as exc:
             logger.exception("Index job enqueue failed. paper_id=%s", paper_id)
             render_error_card("索引任务创建失败", "请检查团队权限和数据库状态。", str(exc))
@@ -4057,7 +4061,8 @@ def render_team_management_page() -> None:
         if submitted:
             try:
                 team = create_team(current_user_id(), team_name)
-                st.session_state["current_team_id"] = int(team["team_id"])
+                st.session_state["pending_current_team_id"] = int(team["team_id"])
+                st.session_state.pop("processed_pdf", None)
                 st.success("团队已创建。")
                 st.rerun()
             except Exception as exc:
