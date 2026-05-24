@@ -11,12 +11,14 @@ from typing import Any
 
 from config import settings
 from src.embedding_client import EmbeddingClient
+from src.logger import get_logger
 from src.vlm_client import QwenVLMClient
 
 
 CHUNKER_VERSION = "semantic-multimodal-v2-qwen-vlm"
 DEFAULT_CHUNK_SIZE = 512
 DEFAULT_OVERLAP = 100
+logger = get_logger(__name__)
 
 SECTION_ALIASES = {
     "abstract": "Abstract",
@@ -571,7 +573,20 @@ def image_metadata(element: dict[str, Any]) -> dict[str, Any]:
 
 def image_description(image: dict[str, Any], vlm_client: Any) -> str:
     """Build the real VLM-backed image description used for retrieval."""
-    vlm_description = " ".join(str(vlm_client.describe(image)).split())
+    try:
+        vlm_description = " ".join(str(vlm_client.describe(image)).split())
+    except Exception as exc:
+        vlm_description = fallback_image_description(image)
+        image["vlm_error"] = " ".join(str(exc).split())
+        logger.warning(
+            "VLM image description failed; using metadata fallback. "
+            "kind=%s page=%s path=%s sources=%s error=%s",
+            image.get("kind") or "image",
+            image.get("page_num") or "",
+            image.get("path") or "",
+            image.get("source_paths") or [],
+            exc,
+        )
     image["vlm_description"] = vlm_description
     parts = [
         f"kind={image.get('kind') or 'image'}",
@@ -584,7 +599,28 @@ def image_description(image: dict[str, Any], vlm_client: Any) -> str:
     if bbox:
         parts.append(f"bbox={bbox}")
     parts.append(f"vlm={vlm_description}")
+    if image.get("vlm_error"):
+        parts.append(f"vlm_error={image.get('vlm_error')}")
     return "[图片: " + "; ".join(parts) + "]"
+
+
+def fallback_image_description(image: dict[str, Any]) -> str:
+    """Build a metadata-only description when the VLM call cannot be used."""
+    parts = [
+        f"metadata-only {image.get('kind') or 'image'}",
+        f"caption={image.get('caption') or ''}",
+        f"alt={image.get('alt_text') or ''}",
+        f"label={image.get('label') or ''}",
+        f"page={image.get('page_num') or ''}",
+        f"path={image.get('path') or ''}",
+    ]
+    source_paths = image.get("source_paths") or []
+    if source_paths:
+        parts.append(f"sources={source_paths}")
+    bbox = image.get("bbox")
+    if bbox:
+        parts.append(f"bbox={bbox}")
+    return "; ".join(parts)
 
 
 def table_element_chunks(

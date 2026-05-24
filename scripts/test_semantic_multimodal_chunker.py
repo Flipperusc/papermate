@@ -44,9 +44,15 @@ class FakeVLMClient:
         return f"VLM description for {image.get('caption') or image.get('path')}"
 
 
+class FailingVLMClient:
+    def describe(self, image: dict) -> str:
+        raise RuntimeError("Image file not found for VLM description:")
+
+
 def main() -> None:
     test_semantic_breakpoint_and_overlap()
     test_image_binding()
+    test_image_binding_falls_back_when_vlm_fails()
     test_table_modes()
     test_legacy_pages()
     test_embedding_failure()
@@ -105,6 +111,36 @@ def test_image_binding() -> None:
     assert "[图片:" in chunks[-1]["text"]
     assert "VLM description" in chunks[-1]["text"]
     assert chunks[-1]["images"][0]["vlm_description"]
+
+
+def test_image_binding_falls_back_when_vlm_fails() -> None:
+    elements = [
+        {
+            "type": "image",
+            "order": 0,
+            "page_num": 2,
+            "caption": "Architecture diagram",
+            "alt_text": "model blocks",
+            "path": "",
+            "bbox": [1, 2, 3, 4],
+        },
+    ]
+    chunks = chunk_pages(
+        "paper",
+        pages=[],
+        elements=elements,
+        chunk_size=512,
+        overlap=100,
+        embedding_client=FakeEmbeddingClient(),
+        vlm_client=FailingVLMClient(),
+    )
+    assert len(chunks) == 1
+    image = chunks[0]["images"][0]
+    assert chunks[0]["chunk_type"] == "multimodal"
+    assert "metadata-only image" in chunks[0]["text"]
+    assert "Architecture diagram" in chunks[0]["text"]
+    assert image["vlm_description"].startswith("metadata-only image")
+    assert "Image file not found" in image["vlm_error"]
 
 
 def test_table_modes() -> None:
