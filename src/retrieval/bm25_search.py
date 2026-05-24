@@ -93,7 +93,10 @@ class BM25Searcher:
                     chunk_index,
                     page_num,
                     section_title,
-                    text
+                    text,
+                    chunk_type,
+                    images_json,
+                    tables_json
                 FROM chunks
                 WHERE paper_id = ?
                 ORDER BY chunk_index ASC

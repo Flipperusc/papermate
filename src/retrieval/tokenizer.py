@@ -32,10 +32,11 @@ TOKEN_PATTERN = re.compile(
     r"|[\u4e00-\u9fff]+"
 )
 
-NUMBERED_ENTITY_PATTERN = re.compile(
-    r"\b(table|figure|fig|eq|equation)\.?\s*(\d+(?:\.\d+)*)\b",
+EN_NUMBERED_ENTITY_PATTERN = re.compile(
+    r"\b(table|tab|figure|fig|eq|equation)\.?\s*(\d+(?:\.\d+)*)\b",
     flags=re.IGNORECASE,
 )
+ZH_NUMBERED_ENTITY_PATTERN = re.compile(r"(表|图|公式)\s*(\d+(?:\.\d+)*)")
 
 
 def tokenize_text(text: str) -> list[str]:
@@ -43,11 +44,18 @@ def tokenize_text(text: str) -> list[str]:
     normalized_text = str(text or "")
     tokens: list[str] = []
 
-    for match in NUMBERED_ENTITY_PATTERN.finditer(normalized_text):
-        label = match.group(1).lower().rstrip(".")
+    for match in EN_NUMBERED_ENTITY_PATTERN.finditer(normalized_text):
+        label = _canonical_numbered_label(match.group(1).lower().rstrip("."))
         number = match.group(2)
         tokens.append(f"{label} {number}")
         tokens.append(f"{label}-{number}")
+
+    for match in ZH_NUMBERED_ENTITY_PATTERN.finditer(normalized_text):
+        label = match.group(1)
+        number = match.group(2)
+        tokens.append(f"{label} {number}")
+        tokens.append(f"{label}-{number}")
+        tokens.append(f"{_canonical_numbered_label(label)} {number}")
 
     for match in TOKEN_PATTERN.finditer(normalized_text):
         token = normalize_token(match.group(0))
@@ -70,6 +78,18 @@ def normalize_token(token: str) -> str:
     if normalized.endswith(".") and normalized not in {"eq.", "fig."}:
         normalized = normalized.rstrip(".")
     return normalized
+
+
+def _canonical_numbered_label(label: str) -> str:
+    mapping = {
+        "tab": "table",
+        "fig": "figure",
+        "eq": "equation",
+        "表": "table",
+        "图": "figure",
+        "公式": "equation",
+    }
+    return mapping.get(label, label)
 
 
 def tokenize_cjk(token: str) -> list[str]:

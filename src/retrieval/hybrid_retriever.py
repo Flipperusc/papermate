@@ -1,14 +1,18 @@
-"""Hybrid vector + BM25 retrieval with RRF fusion."""
+"""Hybrid vector + BM25 retrieval with RRF, reranking, and evidence expansion."""
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 from config import settings
 from src.errors import AppError, ErrorCode
 from src.logger import get_logger
 from src.retrieval.bm25_store import BM25Store
-from src.retrieval.query_processor import classify_query, expand_query, get_rrf_weights
+from src.retrieval.constants import RETRIEVAL_INDEX_VERSION
+from src.retrieval.evidence_expander import EvidenceExpander
+from src.retrieval.query_planner import QueryPlan, get_rrf_weights, plan_query
+from src.retrieval.reranker import LLMReranker
 from src.retrieval.rrf import reciprocal_rank_fusion
 from src.retrieval.vector_retriever import VectorRetriever
 
@@ -17,40 +21,52 @@ logger = get_logger(__name__)
 
 
 class HybridRetriever:
-    """Combine Chroma vector retrieval and BM25 retrieval with RRF."""
+    """Combine Chroma vector retrieval, BM25, RRF, rerank, and neighbor expansion."""
 
     def __init__(
         self,
         vector_retriever=None,
         bm25_store=None,
-        vector_top_k: int = 20,
-        bm25_top_k: int = 20,
-        final_top_k: int = 6,
-        rrf_k: int = 60,
+        vector_top_k: int | None = None,
+        bm25_top_k: int | None = None,
+        final_top_k: int | None = None,
+        rrf_k: int | None = None,
+        rerank_top_k: int | None = None,
+        rerank_enabled: bool | None = None,
+        rerank_batch_size: int | None = None,
+        reranker=None,
+        evidence_expander=None,
         vector_store=None,
         bm25_searcher=None,
     ) -> None:
         # vector_store and bm25_searcher are accepted for compatibility with
-        # earlier local code; the new public API is vector_retriever/bm25_store.
+        # earlier local code; the public API is vector_retriever/bm25_store.
         self.vector_retriever = vector_retriever or VectorRetriever(vector_store=vector_store)
         self.bm25_store = bm25_store or bm25_searcher or BM25Store()
         self.vector_top_k = max(1, int(vector_top_k or settings.vector_top_k))
         self.bm25_top_k = max(1, int(bm25_top_k or settings.bm25_top_k))
         self.final_top_k = max(1, int(final_top_k or settings.final_top_k))
         self.rrf_k = max(1, int(rrf_k or settings.rrf_k))
+        self.rerank_top_k = max(1, int(rerank_top_k or settings.rerank_top_k))
+        self.rerank_enabled = settings.rerank_enabled if rerank_enabled is None else bool(rerank_enabled)
+        self.reranker = reranker or LLMReranker(
+            enabled=self.rerank_enabled,
+            top_k=self.rerank_top_k,
+            batch_size=rerank_batch_size or settings.rerank_batch_size,
+        )
+        self.evidence_expander = evidence_expander or EvidenceExpander(window=settings.context_expand_window)
 
     def retrieve(self, paper_id: str, question: str) -> dict[str, Any]:
-        """Retrieve and fuse context chunks for one paper question."""
-        query_type = classify_query(question)
-        expanded_query = expand_query(question)
-        weights = get_rrf_weights(query_type)
+        """Retrieve, fuse, rerank, and expand context chunks for one paper question."""
+        query_plan = plan_query(question)
+        weights = get_rrf_weights(query_plan.question_type)
 
         # Search failures are captured per channel so vector-only or BM25-only
         # retrieval can still answer when the other index is unavailable.
-        vector_results, vector_error = self._safe_vector_search(paper_id, question)
-        bm25_results, bm25_error = self._safe_bm25_search(paper_id, expanded_query)
+        vector_results, vector_error = self._safe_vector_search(paper_id, query_plan.vector_query)
+        bm25_results, bm25_error = self._safe_bm25_search(paper_id, query_plan.bm25_query)
 
-        available_lists: list[list[dict]] = []
+        available_lists: list[list[dict[str, Any]]] = []
         available_weights: list[float] = []
         if vector_results:
             available_lists.append(vector_results)
@@ -64,16 +80,25 @@ class HybridRetriever:
             rrf_k=self.rrf_k,
             weights=available_weights if available_lists else None,
         )
-        final_results = fused_results[: self.final_top_k]
+        candidate_results = fused_results[: self.rerank_top_k]
+        reranked_results = self.reranker.rerank(
+            query_plan,
+            candidate_results,
+            top_k=self.rerank_top_k,
+        ) if candidate_results else []
+        core_results = reranked_results[: self.final_top_k]
+        final_results = self.evidence_expander.expand(paper_id, core_results) if core_results else []
         strategy = self._strategy(vector_results, bm25_results, vector_error, bm25_error)
 
         retrieval_details = self._build_details(
-            query_type=query_type,
-            expanded_query=expanded_query,
+            query_plan=query_plan,
             weights=weights,
             vector_results=vector_results,
             bm25_results=bm25_results,
             fused_results=fused_results,
+            candidate_results=candidate_results,
+            reranked_results=reranked_results,
+            core_results=core_results,
             final_results=final_results,
             strategy=strategy,
             vector_error=vector_error,
@@ -82,21 +107,27 @@ class HybridRetriever:
 
         return {
             "strategy": strategy,
-            "query_type": query_type,
-            "expanded_query": expanded_query,
+            "query_type": query_plan.question_type,
+            "question_type": query_plan.question_type,
+            "question_type_label": query_plan.question_type_label,
+            "expanded_query": query_plan.bm25_query,
+            "query_plan": asdict(query_plan),
             "weights": weights,
             "vector_results": vector_results,
             "bm25_results": bm25_results,
             "fused_results": fused_results,
+            "candidate_results": candidate_results,
+            "reranked_results": reranked_results,
+            "core_results": core_results,
             "final_results": final_results,
-            # Backward-compatible aliases used by the current RAG pipeline UI.
+            # Backward-compatible alias used by the current RAG pipeline UI.
             "chunks": final_results,
             "retrieval_details": retrieval_details,
         }
 
-    def _safe_vector_search(self, paper_id: str, question: str) -> tuple[list[dict], Exception | None]:
+    def _safe_vector_search(self, paper_id: str, query: str) -> tuple[list[dict], Exception | None]:
         try:
-            return self.vector_retriever.search(paper_id, question, self.vector_top_k), None
+            return self.vector_retriever.search(paper_id, query, self.vector_top_k), None
         except Exception as exc:
             logger.warning(
                 "Vector search failed; hybrid retrieval may fallback. paper_id=%s error=%s",
@@ -105,12 +136,12 @@ class HybridRetriever:
             )
             return [], exc
 
-    def _safe_bm25_search(self, paper_id: str, expanded_query: str) -> tuple[list[dict], Exception | None]:
+    def _safe_bm25_search(self, paper_id: str, query: str) -> tuple[list[dict], Exception | None]:
         try:
-            return self.bm25_store.search(paper_id, expanded_query, self.bm25_top_k), None
+            return self.bm25_store.search(paper_id, query, self.bm25_top_k), None
         except AppError as exc:
             if exc.code == ErrorCode.BM25_INDEX_MISSING:
-                logger.warning("BM25 index missing; falling back to vector search. paper_id=%s", paper_id)
+                logger.warning("BM25 index missing or stale; falling back to vector search. paper_id=%s", paper_id)
             else:
                 logger.warning(
                     "BM25 search failed; hybrid retrieval may fallback. paper_id=%s error=%s",
@@ -143,43 +174,67 @@ class HybridRetriever:
 
     def _build_details(
         self,
-        query_type: str,
-        expanded_query: str,
+        query_plan: QueryPlan,
         weights: list[float],
         vector_results: list[dict],
         bm25_results: list[dict],
         fused_results: list[dict],
+        candidate_results: list[dict],
+        reranked_results: list[dict],
+        core_results: list[dict],
         final_results: list[dict],
         strategy: str,
         vector_error: Exception | None,
         bm25_error: Exception | None,
     ) -> dict[str, Any]:
+        rerank_source = _first_value(reranked_results, "rerank_source")
+        expanded_neighbors = sum(1 for chunk in final_results if chunk.get("expanded_neighbor"))
         return {
             "strategy": strategy,
-            "query_type": query_type,
-            "question_type": query_type,
-            "question_type_label": query_type,
-            "expanded_query": expanded_query,
+            "query_type": query_plan.question_type,
+            "question_type": query_plan.question_type,
+            "question_type_label": query_plan.question_type_label,
+            "expanded_query": query_plan.bm25_query,
+            "query_plan": asdict(query_plan),
             "weights": weights,
             "vector_top_k": self.vector_top_k,
             "bm25_top_k": self.bm25_top_k,
+            "rerank_top_k": self.rerank_top_k,
             "final_top_k": self.final_top_k,
             "rrf_k": self.rrf_k,
+            "rerank_enabled": self.rerank_enabled,
+            "rerank_source": rerank_source,
+            "index_version": RETRIEVAL_INDEX_VERSION,
             "vector_hits": len(vector_results),
             "bm25_hits": len(bm25_results),
             "fused_hits": len(fused_results),
+            "candidate_count": len(candidate_results),
+            "reranked_hits": len(reranked_results),
+            "core_hits": len(core_results),
+            "expanded_neighbors": expanded_neighbors,
             "final_hits": len(final_results),
             "vector_error": type(vector_error).__name__ if vector_error else "",
             "bm25_error": type(bm25_error).__name__ if bm25_error else "",
+            "vector_error_message": _error_message(vector_error),
+            "bm25_error_message": _error_message(bm25_error),
             "retrieved_chunks": [
                 {
                     "rank": index,
                     "chunk_id": chunk.get("chunk_id"),
                     "page_num": chunk.get("page_num", ""),
                     "section_title": chunk.get("section_title", ""),
+                    "chunk_type": chunk.get("chunk_type", "text"),
                     "retrieval_sources": chunk.get("retrieval_sources", []),
                     "source_ranks": chunk.get("source_ranks", {}),
                     "rrf_score": chunk.get("rrf_score"),
+                    "rrf_score_norm": chunk.get("rrf_score_norm"),
+                    "rerank_score": chunk.get("rerank_score"),
+                    "final_score": chunk.get("final_score"),
+                    "section_boost": chunk.get("section_boost"),
+                    "exact_overlap": chunk.get("exact_overlap"),
+                    "expanded_neighbor": bool(chunk.get("expanded_neighbor", False)),
+                    "parent_chunk_id": chunk.get("parent_chunk_id", ""),
+                    "index_version": chunk.get("index_version", ""),
                     "vector_rank": chunk.get("source_ranks", {}).get("vector"),
                     "bm25_rank": chunk.get("source_ranks", {}).get("bm25"),
                     "bm25_score": chunk.get("bm25_score"),
@@ -188,3 +243,17 @@ class HybridRetriever:
                 for index, chunk in enumerate(final_results, start=1)
             ],
         }
+
+
+def _first_value(items: list[dict[str, Any]], key: str) -> Any:
+    for item in items:
+        value = item.get(key)
+        if value not in (None, ""):
+            return value
+    return ""
+
+
+def _error_message(error: Exception | None) -> str:
+    if error is None:
+        return ""
+    return str(getattr(error, "user_message", "") or error)

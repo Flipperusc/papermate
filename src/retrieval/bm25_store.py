@@ -9,8 +9,12 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from config import settings
+from src.chunk_metadata import metadata_json
 from src.errors import AppError, ErrorCode
 from src.logger import get_logger
+from src.retrieval.constants import RETRIEVAL_INDEX_VERSION
+from src.retrieval.index_text import build_bm25_search_text, extract_index_entities
 from src.retrieval.tokenizer import tokenize_text
 
 
@@ -20,8 +24,8 @@ logger = get_logger(__name__)
 class BM25Store:
     """Build and search persistent BM25 indexes for paper chunks."""
 
-    def __init__(self, index_dir: str = "data/bm25") -> None:
-        self.index_dir = Path(index_dir)
+    def __init__(self, index_dir: str | Path | None = None) -> None:
+        self.index_dir = Path(index_dir) if index_dir is not None else settings.bm25_dir
 
     def build_index(self, paper_id: str, chunks: list[dict]) -> dict:
         """Build and persist a BM25 index for one paper."""
@@ -39,7 +43,7 @@ class BM25Store:
 
             self.index_dir.mkdir(parents=True, exist_ok=True)
             payloads = [self._build_payload(chunk) for chunk in chunks]
-            tokenized_corpus = [tokenize_text(payload["text"]) for payload in payloads]
+            tokenized_corpus = [tokenize_text(payload["search_text"]) for payload in payloads]
             bm25 = BM25Okapi(tokenized_corpus)
 
             index_path = self._index_path(clean_paper_id)
@@ -55,6 +59,7 @@ class BM25Store:
             return {
                 "paper_id": clean_paper_id,
                 "chunk_count": len(payloads),
+                "index_version": RETRIEVAL_INDEX_VERSION,
                 "index_path": str(index_path),
                 "payload_path": str(payload_path),
             }
@@ -83,6 +88,7 @@ class BM25Store:
                 bm25 = pickle.load(file)
             with payload_path.open("r", encoding="utf-8") as file:
                 payloads = json.load(file)
+            self._ensure_current_payloads(payloads)
 
             query_tokens = tokenize_text(query)
             if not query_tokens:
@@ -109,7 +115,12 @@ class BM25Store:
                         "chunk_index": payload["chunk_index"],
                         "section_title": payload.get("section_title", ""),
                         "page_num": payload.get("page_num", ""),
+                        "chunk_type": payload.get("chunk_type", "text"),
                         "text": payload.get("text", ""),
+                        "search_text": payload.get("search_text", ""),
+                        "images_json": payload.get("images_json", "[]"),
+                        "tables_json": payload.get("tables_json", "[]"),
+                        "index_version": payload.get("index_version", ""),
                         "rank": len(results) + 1,
                         "bm25_score": score,
                         "retrieval_source": "bm25",
@@ -137,14 +148,31 @@ class BM25Store:
 
     @staticmethod
     def _build_payload(chunk: dict) -> dict:
+        entities = extract_index_entities(chunk)
         return {
             "chunk_id": str(chunk["chunk_id"]),
             "paper_id": str(chunk["paper_id"]),
             "chunk_index": int(chunk["chunk_index"]),
             "section_title": str(chunk.get("section_title") or ""),
             "page_num": chunk.get("page_num", ""),
+            "chunk_type": str(chunk.get("chunk_type") or "text"),
             "text": str(chunk["text"]),
+            "search_text": build_bm25_search_text(chunk),
+            "images_json": metadata_json(chunk, "images"),
+            "tables_json": metadata_json(chunk, "tables"),
+            "entities": entities,
+            "index_version": RETRIEVAL_INDEX_VERSION,
         }
+
+    @staticmethod
+    def _ensure_current_payloads(payloads: list[dict]) -> None:
+        if all(payload.get("index_version") == RETRIEVAL_INDEX_VERSION for payload in payloads):
+            return
+        raise AppError(
+            code=ErrorCode.BM25_INDEX_MISSING,
+            user_message="当前论文关键词索引版本过旧，请重新构建论文索引。",
+            detail=f"Expected BM25 index_version={RETRIEVAL_INDEX_VERSION}",
+        )
 
 
 class SimpleBM25Okapi:

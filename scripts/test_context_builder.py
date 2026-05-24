@@ -72,6 +72,21 @@ def main() -> None:
     assert len(limited_text) <= len(first_context)
     assert len(limited_citations) == 1
 
+    neighbor = {
+        "chunk_id": "chunk_neighbor",
+        "paper_id": "paper_1",
+        "chunk_index": 2,
+        "page_num": 5,
+        "section_title": "Experiments",
+        "text": "neighbor " * 200,
+        "expanded_neighbor": True,
+        "parent_chunk_id": "chunk_A",
+    }
+    priority_text, priority_citations = build_context([chunks[0], neighbor], max_chars=len(first_context) + 20)
+    assert "chunk_A" in priority_text
+    assert "chunk_neighbor" not in priority_text
+    assert len(priority_citations) == 1
+
     empty_text, empty_citations = build_context(chunks, max_chars=10)
     assert empty_text == ""
     assert empty_citations == []

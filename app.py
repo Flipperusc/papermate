@@ -7,6 +7,7 @@ import hashlib
 import html
 import hmac
 import io
+import json
 import os
 import sqlite3
 import re
@@ -1228,6 +1229,11 @@ def get_uploaded_file_signature(uploaded_file: UploadedFile) -> str:
             str(settings.mineru_is_ocr),
             settings.mineru_language,
             CHUNKER_VERSION,
+            settings.rag_chunk_strategy,
+            str(settings.rag_chunk_size),
+            str(settings.rag_chunk_overlap),
+            settings.vlm_base_url,
+            settings.vlm_model,
         ]
     )
     return f"{uploaded_file.name}:{len(file_bytes)}:{digest}:{parse_settings}"
@@ -1249,7 +1255,13 @@ def process_uploaded_pdf(
 
     saved_file = save_uploaded_pdf(uploaded_file)
     parsed_pdf = parse_pdf(saved_file["save_path"], saved_file["paper_id"])
-    chunks = chunk_pages(saved_file["paper_id"], parsed_pdf["pages"])
+    chunks = chunk_pages(
+        saved_file["paper_id"],
+        parsed_pdf["pages"],
+        chunk_size=settings.rag_chunk_size,
+        overlap=settings.rag_chunk_overlap,
+        elements=parsed_pdf.get("elements"),
+    )
     total_chars, preview = build_text_preview(parsed_pdf)
 
     db_save_failed = False
@@ -1399,9 +1411,14 @@ def render_chunk_preview(chunks: list[dict[str, Any]]) -> None:
     st.write("chunk 数量：", len(chunks))
     for chunk in chunks[:3]:
         section = chunk["section_title"] or "未识别章节"
-        title = f"Chunk {chunk['chunk_index']} | 第 {chunk['page_num']} 页 | {section}"
+        chunk_type = chunk.get("chunk_type", "text")
+        title = f"Chunk {chunk['chunk_index']} | {chunk_type} | 第 {chunk['page_num']} 页 | {section}"
         with st.expander(title, expanded=chunk["chunk_index"] == 0):
             st.caption(f"chunk_id：{chunk['chunk_id']}")
+            image_count = chunk_metadata_count(chunk, "images")
+            table_count = chunk_metadata_count(chunk, "tables")
+            if image_count or table_count:
+                st.caption(f"metadata：{image_count} images / {table_count} tables")
             st.text_area(
                 "chunk 预览",
                 chunk["text"][:1000],
@@ -1427,11 +1444,31 @@ def render_source_chunks(source_chunks: list[dict[str, Any]]) -> None:
         source_id = chunk.get("source_id") or f"片段{chunk.get('citation_id', '')}"
         title = (
             f"[{source_id}] {format_page_label(chunk.get('page_num'))} | "
-            f"{chunk.get('section_title', '未知章节')} | {chunk.get('chunk_id', '')}"
+            f"{chunk.get('section_title', '未知章节')} | "
+            f"{chunk.get('chunk_type', 'text')} | {chunk.get('chunk_id', '')}"
         )
         with st.expander(title):
             st.markdown(source_anchor_link(chunk.get("chunk_id")), unsafe_allow_html=True)
+            image_count = chunk_metadata_count(chunk, "images")
+            table_count = chunk_metadata_count(chunk, "tables")
+            if image_count or table_count:
+                st.caption(f"metadata：{image_count} images / {table_count} tables")
             st.write(chunk.get("text", ""))
+
+
+def chunk_metadata_count(chunk: dict[str, Any], key: str) -> int:
+    """Return number of image/table metadata records on a chunk."""
+    value = chunk.get(key)
+    if isinstance(value, list):
+        return len(value)
+    raw_json = chunk.get(f"{key}_json")
+    if not raw_json:
+        return 0
+    try:
+        parsed = json.loads(str(raw_json))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return 0
+    return len(parsed) if isinstance(parsed, list) else 0
 
 
 def format_page_label(page_num: Any) -> str:
@@ -1484,6 +1521,7 @@ def render_retrieval_details(details: dict[str, Any]) -> None:
                     "chunk_id": row.get("chunk_id"),
                     "页码": row.get("page_num"),
                     "章节": row.get("section_title") or "未识别章节",
+                    "类型": row.get("chunk_type", "text"),
                     "来源": source_text,
                     "RRF分数": format_optional_float(row.get("rrf_score")),
                     "向量排名": row.get("vector_rank") or "",

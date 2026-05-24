@@ -59,9 +59,13 @@ def parse_pdf_with_mineru(file_path: str | Path, paper_id: str) -> dict[str, Any
     content_list = mineru_result.get("content_list")
     # MinerU's content_list preserves page-level structure; if it is missing,
     # fall back to a single Markdown-derived page so indexing can still proceed.
+    images = mineru_result.get("images", [])
+    elements = elements_from_content_list(content_list, images) if content_list else []
     pages = pages_from_content_list(content_list) if content_list else []
     if not pages:
         pages = pages_from_markdown(mineru_result["markdown"])
+    if not elements:
+        elements = elements_from_pages(pages)
 
     total_text = "".join(page["text"] for page in pages)
     if not total_text.strip():
@@ -77,7 +81,8 @@ def parse_pdf_with_mineru(file_path: str | Path, paper_id: str) -> dict[str, Any
         "markdown": mineru_result["markdown"],
         "markdown_path": mineru_result["markdown_path"],
         "content_list_path": mineru_result.get("content_list_path"),
-        "images": mineru_result.get("images", []),
+        "images": images,
+        "elements": elements,
         "mineru_batch_id": mineru_result["batch_id"],
     }
 
@@ -115,9 +120,161 @@ def parse_pdf_with_pymupdf(file_path: str | Path, paper_id: str) -> dict[str, An
         "paper_id": paper_id,
         "page_count": page_count,
         "pages": pages,
+        "elements": elements_from_pages(pages),
         "parser": "pymupdf",
         "images": [],
     }
+
+
+def elements_from_pages(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build text-only chunking elements from page records."""
+    elements: list[dict[str, Any]] = []
+    for order, page in enumerate(pages):
+        text = str(page.get("text", "")).strip()
+        if not text:
+            continue
+        elements.append(
+            {
+                "type": "text",
+                "order": order,
+                "page_num": int(page.get("page_num", 1) or 1),
+                "text": text,
+            }
+        )
+    return elements
+
+
+def elements_from_content_list(
+    content_list: Any,
+    images: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build ordered text/image/table elements from MinerU content_list."""
+    if not isinstance(content_list, list):
+        return []
+
+    image_lookup = build_image_lookup(images or [])
+    elements: list[dict[str, Any]] = []
+    for order, item in enumerate(content_list):
+        if not isinstance(item, dict):
+            continue
+
+        item_type = str(item.get("type", "")).strip().lower()
+        page_num = content_item_page_num(item)
+        if item_type == "table":
+            elements.append(build_table_element(item, image_lookup, order, page_num))
+            continue
+        if item_type in {"image", "equation"}:
+            elements.append(build_image_element(item, image_lookup, order, page_num))
+            continue
+
+        text = content_item_to_text(item)
+        if text:
+            elements.append(
+                {
+                    "type": "text",
+                    "order": order,
+                    "page_num": page_num,
+                    "text": text,
+                    "raw_type": item_type,
+                    "bbox": item.get("bbox"),
+                }
+            )
+
+    return elements
+
+
+def build_image_lookup(images: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Index normalized MinerU images by archive path, filename, and path."""
+    lookup: dict[str, dict[str, Any]] = {}
+    for image in images:
+        for key in ("archive_name", "file_name", "path"):
+            value = image.get(key)
+            if isinstance(value, str) and value.strip():
+                for candidate in normalized_path_keys(value):
+                    lookup[candidate] = image
+        for source_path in image.get("source_paths") or []:
+            if isinstance(source_path, str) and source_path.strip():
+                for candidate in normalized_path_keys(source_path):
+                    lookup[candidate] = image
+    return lookup
+
+
+def build_image_element(
+    item: dict[str, Any],
+    image_lookup: dict[str, dict[str, Any]],
+    order: int,
+    page_num: int,
+) -> dict[str, Any]:
+    """Return one image-like element with normalized image metadata when available."""
+    image = lookup_content_image(item, image_lookup) or {}
+    caption = first_text_value(item, ("image_caption", "caption", "alt_text", "content"))
+    return {
+        "type": "image",
+        "order": order,
+        "page_num": page_num,
+        "kind": str(item.get("type") or image.get("kind") or "image").lower(),
+        "path": image.get("path") or first_text_value(item, ("img_path", "image_path", "path")),
+        "mime_type": image.get("mime_type") or first_text_value(item, ("mime_type",)),
+        "caption": image.get("caption") or caption,
+        "alt_text": first_text_value(item, ("alt_text", "alt", "content")),
+        "bbox": image.get("bbox") or item.get("bbox"),
+        "visual_id": image.get("visual_id") or "",
+        "label": image.get("label") or "",
+        "source_paths": image.get("source_paths") or item_source_paths(item),
+    }
+
+
+def build_table_element(
+    item: dict[str, Any],
+    image_lookup: dict[str, dict[str, Any]],
+    order: int,
+    page_num: int,
+) -> dict[str, Any]:
+    """Return one table element with table body and visual metadata."""
+    image = lookup_content_image(item, image_lookup) or {}
+    return {
+        "type": "table",
+        "order": order,
+        "page_num": page_num,
+        "caption": image.get("caption") or first_text_value(item, ("table_caption", "caption")),
+        "table_body": image.get("table_body") or first_text_value(item, ("table_body", "table_html", "html", "content")),
+        "path": image.get("path") or first_text_value(item, ("img_path", "image_path", "path")),
+        "bbox": image.get("bbox") or item.get("bbox"),
+        "visual_id": image.get("visual_id") or "",
+        "label": image.get("label") or "",
+        "source_paths": image.get("source_paths") or item_source_paths(item),
+    }
+
+
+def lookup_content_image(
+    item: dict[str, Any],
+    image_lookup: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Find a normalized MinerU visual record for a content_list item."""
+    for source_path in item_source_paths(item):
+        for candidate in normalized_path_keys(source_path):
+            image = image_lookup.get(candidate)
+            if image:
+                return image
+    return None
+
+
+def item_source_paths(item: dict[str, Any]) -> list[str]:
+    """Return path-like references from a MinerU content item."""
+    sources: list[str] = []
+    for key in ("img_path", "image_path", "path"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            sources.append(value.strip())
+    return sources
+
+
+def normalized_path_keys(value: str) -> list[str]:
+    """Return stable lookup keys for local and archive image paths."""
+    normalized = str(value or "").replace("\\", "/").strip()
+    if not normalized:
+        return []
+    return list(dict.fromkeys([normalized, Path(normalized).name]))
 
 
 def pages_from_content_list(content_list: Any) -> list[dict[str, Any]]:
@@ -165,9 +322,12 @@ def content_item_to_text(item: dict[str, Any]) -> str:
         (
             "text",
             "content",
+            "list_items",
+            "code_body",
             "table_body",
             "table_caption",
             "img_caption",
+            "image_caption",
             "caption",
             "latex",
         ),

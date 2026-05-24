@@ -152,8 +152,13 @@ def _base_entry(result: dict[str, Any], chunk_id: str) -> dict[str, Any]:
         "paper_id": result.get("paper_id", ""),
         "chunk_index": result.get("chunk_index"),
         "text": result.get("text", ""),
+        "search_text": result.get("search_text", ""),
         "section_title": result.get("section_title", ""),
         "page_num": result.get("page_num", ""),
+        "chunk_type": result.get("chunk_type", "text"),
+        "images_json": result.get("images_json", "[]"),
+        "tables_json": result.get("tables_json", "[]"),
+        "index_version": result.get("index_version", ""),
         "rrf_score": 0.0,
         "retrieval_sources": [],
         "source_ranks": {},
@@ -161,7 +166,18 @@ def _base_entry(result: dict[str, Any], chunk_id: str) -> dict[str, Any]:
 
 
 def _merge_metadata(entry: dict[str, Any], result: dict[str, Any]) -> None:
-    for key in ("paper_id", "chunk_index", "text", "section_title", "page_num"):
+    for key in (
+        "paper_id",
+        "chunk_index",
+        "text",
+        "search_text",
+        "section_title",
+        "page_num",
+        "chunk_type",
+        "images_json",
+        "tables_json",
+        "index_version",
+    ):
         if _is_missing(entry.get(key)) and not _is_missing(result.get(key)):
             entry[key] = result.get(key)
 

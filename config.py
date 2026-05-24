@@ -104,6 +104,17 @@ class Settings:
     openai_base_url: str = env_value("OPENAI_BASE_URL")
     openai_model: str = env_value("OPENAI_MODEL", "gpt-4o-mini")
 
+    # Vision-language model for multimodal chunk image descriptions.
+    vlm_api_key: str = first_env(("VLM_API_KEY", "DASHSCOPE_API_KEY"))
+    vlm_base_url: str = env_value(
+        "VLM_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    vlm_model: str = env_value("VLM_MODEL", "qwen3.6-plus")
+    vlm_timeout: float = env_float("VLM_TIMEOUT", 90.0)
+    vlm_temperature: float = env_float("VLM_TEMPERATURE", 0.1)
+    vlm_max_tokens: int = env_int("VLM_MAX_TOKENS", 512)
+
     # DeepSeek LLM
     deepseek_api_key: str = env_value("DEEPSEEK_API_KEY")
     deepseek_base_url: str = env_value("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -156,13 +167,23 @@ class Settings:
     embedding_model: str = env_value("EMBEDDING_MODEL", "embedding-3")
     embedding_dimensions: int = env_int("EMBEDDING_DIMENSIONS", 2048)
 
+    # RAG chunking
+    rag_chunk_strategy: str = env_value("RAG_CHUNK_STRATEGY", "semantic_multimodal")
+    rag_chunk_size: int = env_int("RAG_CHUNK_SIZE", 512)
+    rag_chunk_overlap: int = env_int("RAG_CHUNK_OVERLAP", 100)
+    table_large_row_chunk_size: int = env_int("TABLE_LARGE_ROW_CHUNK_SIZE", 20)
+    table_wide_column_group_size: int = env_int("TABLE_WIDE_COLUMN_GROUP_SIZE", 9)
+
     # RAG retrieval
-    vector_top_k: int = env_int("VECTOR_TOP_K", 20)
-    bm25_top_k: int = env_int("BM25_TOP_K", 20)
-    final_top_k: int = env_int("FINAL_TOP_K", 6)
+    vector_top_k: int = env_int("VECTOR_TOP_K", 40)
+    bm25_top_k: int = env_int("BM25_TOP_K", 40)
+    final_top_k: int = env_int("FINAL_TOP_K", 8)
     rrf_k: int = env_int("RRF_K", 60)
-    context_max_chars: int = env_int("CONTEXT_MAX_CHARS", 6000)
-    context_expand_window: int = env_int("CONTEXT_EXPAND_WINDOW", 0)
+    context_max_chars: int = env_int("CONTEXT_MAX_CHARS", 9000)
+    context_expand_window: int = env_int("CONTEXT_EXPAND_WINDOW", 1)
+    rerank_enabled: bool = env_bool("RERANK_ENABLED", True)
+    rerank_top_k: int = env_int("RERANK_TOP_K", 30)
+    rerank_batch_size: int = env_int("RERANK_BATCH_SIZE", 8)
 
 
 settings = Settings()

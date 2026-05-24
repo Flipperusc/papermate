@@ -185,6 +185,14 @@ class RAGPipeline:
             "bm25_top_k": details.get("bm25_top_k", getattr(self.retriever, "bm25_top_k", settings.bm25_top_k)),
             "final_top_k": details.get("final_top_k", getattr(self.retriever, "final_top_k", settings.final_top_k)),
             "rrf_k": details.get("rrf_k", getattr(self.retriever, "rrf_k", settings.rrf_k)),
+            "rerank_enabled": details.get("rerank_enabled", settings.rerank_enabled),
+            "rerank_top_k": details.get("rerank_top_k", settings.rerank_top_k),
+            "rerank_source": details.get("rerank_source", ""),
+            "candidate_count": details.get("candidate_count", len((retrieval_result or {}).get("candidate_results", []))),
+            "reranked_hits": details.get("reranked_hits", len((retrieval_result or {}).get("reranked_results", []))),
+            "core_hits": details.get("core_hits", len((retrieval_result or {}).get("core_results", []))),
+            "expanded_neighbors": details.get("expanded_neighbors", 0),
+            "index_version": details.get("index_version", ""),
             "vector_hits": details.get("vector_hits", len((retrieval_result or {}).get("vector_results", []))),
             "bm25_hits": details.get("bm25_hits", len((retrieval_result or {}).get("bm25_results", []))),
             "fused_hits": details.get("fused_hits", len((retrieval_result or {}).get("fused_results", []))),
@@ -192,6 +200,8 @@ class RAGPipeline:
             "retrieved_chunks": details.get("retrieved_chunks", []),
             "vector_error": details.get("vector_error", ""),
             "bm25_error": details.get("bm25_error", ""),
+            "vector_error_message": details.get("vector_error_message", ""),
+            "bm25_error_message": details.get("bm25_error_message", ""),
         }
         debug["latency_ms"] = _latency_ms(start_time)
         return debug
@@ -230,7 +240,9 @@ def _build_source_chunks(
     citations: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     source_chunks: list[dict[str, Any]] = []
-    for chunk, citation in zip(chunks, citations):
+    chunks_by_id = {str(chunk.get("chunk_id") or ""): chunk for chunk in chunks}
+    for citation in citations:
+        chunk = chunks_by_id.get(str(citation.get("chunk_id") or ""), {})
         source_chunks.append(
             {
                 "source_id": citation.get("source_id"),
@@ -240,12 +252,22 @@ def _build_source_chunks(
                 "chunk_index": chunk.get("chunk_index", ""),
                 "page_num": citation.get("page_num", chunk.get("page_num", "")),
                 "section_title": citation.get("section_title", chunk.get("section_title", "")),
+                "chunk_type": chunk.get("chunk_type", citation.get("chunk_type", "text")),
                 "text": chunk.get("text", ""),
+                "images_json": chunk.get("images_json", citation.get("images_json", "[]")),
+                "tables_json": chunk.get("tables_json", citation.get("tables_json", "[]")),
                 "retrieval_sources": list(chunk.get("retrieval_sources") or []),
                 "source_ranks": dict(chunk.get("source_ranks") or {}),
                 "rrf_score": chunk.get("rrf_score"),
                 "vector_distance": chunk.get("vector_distance"),
                 "bm25_score": chunk.get("bm25_score"),
+                "rerank_score": chunk.get("rerank_score"),
+                "final_score": chunk.get("final_score"),
+                "section_boost": chunk.get("section_boost"),
+                "exact_overlap": chunk.get("exact_overlap"),
+                "expanded_neighbor": bool(chunk.get("expanded_neighbor", False)),
+                "parent_chunk_id": chunk.get("parent_chunk_id", ""),
+                "index_version": chunk.get("index_version", ""),
             }
         )
     return source_chunks

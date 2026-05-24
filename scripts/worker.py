@@ -54,7 +54,13 @@ def run_parse_job(job: dict[str, Any]) -> dict[str, Any]:
     update_paper_status(paper_id, parse_status="running")
 
     parsed_pdf = parse_pdf(paper["save_path"], paper_id)
-    chunks = chunk_pages(paper_id, parsed_pdf["pages"])
+    chunks = chunk_pages(
+        paper_id,
+        parsed_pdf["pages"],
+        chunk_size=settings.rag_chunk_size,
+        overlap=settings.rag_chunk_overlap,
+        elements=parsed_pdf.get("elements"),
+    )
     total_chars = len("\n\n".join(page["text"] for page in parsed_pdf["pages"]))
     save_paper_and_chunks(
         {
@@ -209,7 +215,16 @@ def load_chunks(paper_id: str) -> list[dict[str, Any]]:
     with get_db_connection() as connection:
         rows = connection.execute(
             """
-            SELECT chunk_id, paper_id, chunk_index, page_num, section_title, text
+            SELECT
+                chunk_id,
+                paper_id,
+                chunk_index,
+                page_num,
+                section_title,
+                text,
+                chunk_type,
+                images_json,
+                tables_json
             FROM chunks
             WHERE paper_id = ?
             ORDER BY chunk_index ASC

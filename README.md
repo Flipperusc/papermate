@@ -8,9 +8,10 @@ PaperMate 是一个本地运行的论文阅读 RAG 助手。当前版本 `0.6.1`
 - PDF 解析：默认调用 MinerU 将 PDF 转为 Markdown，并保存 `full.md`、`content_list.json` 和图片资源。
 - 本地解析兜底：可切换到 PyMuPDF，只做文本抽取，不包含 MinerU 的 Markdown 和图片能力。
 - 阅读器：支持原文、中文译文、双语对照三种阅读模式；中文译文可下载，不会覆盖原文。
-- 文本分块：按论文页码、段落和常见章节标题切分 chunk，写入 SQLite。
-- Hybrid RAG：用 Chroma 做向量检索，用 BM25 做关键词检索，再通过 RRF 融合排序。
-- 查询增强：根据问题类型调整向量/BM25 权重，并补充论文领域常见英文关键词。
+- 文本分块：按语义相似度做 sentence-level chunking，并保留页码、章节、图片和表格 metadata，写入 SQLite。
+- 图片理解：图片绑定到相邻文本 chunk 时会调用阿里云百炼 OpenAI 兼容接口，默认模型 `qwen3.6-plus`，描述会进入检索文本和 `images_json`。
+- Hybrid RAG：用 Chroma 做向量检索，用 BM25 做关键词检索，再通过 RRF、DeepSeek rerank 和邻近证据扩展生成上下文。
+- 查询增强：根据问题类型、实体、章节意图、图表公式编号调整检索查询和向量/BM25 权重。
 - 可信引用：引用来源由系统根据 chunk metadata 生成，页面展示片段、页码、章节和检索细节。
 - DeepSeek 生成：DeepSeek 负责问答生成、文献卡片生成和中文翻译；Embedding 单独配置，默认使用智谱 `embedding-3`。
 - 文献卡片库：支持生成、保存、搜索、筛选、编辑、批量删除、创建和重命名卡片库。
@@ -58,8 +59,11 @@ papermate/
     retrieval/
       bm25_store.py
       context_builder.py
+      evidence_expander.py
       hybrid_retriever.py
+      query_planner.py
       query_processor.py
+      reranker.py
       rrf.py
       tokenizer.py
       vector_retriever.py
@@ -128,6 +132,8 @@ EMBEDDING_DIMENSIONS=2048
 - `PAPERMATE_APP_PASSWORD` 当前主要作为“反馈记录”管理员密码的备用值；也可以单独设置 `PAPERMATE_ADMIN_PASSWORD`。
 - DeepSeek 不参与 Embedding。不要把 DeepSeek 配成 Embedding 服务。
 - 切换 Embedding provider、模型或维度后，需要重新构建论文索引。
+- 语义分块会在解析阶段调用 Embedding；如果 Embedding API Key 或网络不可用，解析任务会失败。
+- 含图片的论文会在分块阶段调用 Qwen VLM；请在 `.env` 填写 `DASHSCOPE_API_KEY`，也可以用 `VLM_API_KEY` 覆盖。
 
 ## 主要配置
 
@@ -189,11 +195,26 @@ TRANSLATION_TIMEOUT=60
 Hybrid RAG：
 
 ```env
-VECTOR_TOP_K=20
-BM25_TOP_K=20
-FINAL_TOP_K=6
+RAG_CHUNK_STRATEGY=semantic_multimodal
+RAG_CHUNK_SIZE=512
+RAG_CHUNK_OVERLAP=100
+TABLE_LARGE_ROW_CHUNK_SIZE=20
+TABLE_WIDE_COLUMN_GROUP_SIZE=9
+DASHSCOPE_API_KEY=your_bailian_dashscope_api_key
+VLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+VLM_MODEL=qwen3.6-plus
+VLM_TIMEOUT=90
+VLM_TEMPERATURE=0.1
+VLM_MAX_TOKENS=512
+VECTOR_TOP_K=40
+BM25_TOP_K=40
+FINAL_TOP_K=8
 RRF_K=60
-CONTEXT_MAX_CHARS=6000
+CONTEXT_MAX_CHARS=9000
+CONTEXT_EXPAND_WINDOW=1
+RERANK_ENABLED=true
+RERANK_TOP_K=30
+RERANK_BATCH_SIZE=8
 ```
 
 ## 使用流程
@@ -228,12 +249,14 @@ python scripts/worker.py --once
 PDF
   -> MinerU / PyMuPDF 解析
   -> Markdown + pages + images
-  -> section-aware chunking
+  -> semantic multimodal chunking
   -> SQLite papers/chunks
   -> Chroma vector index + BM25 keyword index
   -> Query Processor 分类和扩展问题
   -> Vector Search + BM25 Search
   -> RRF 融合排序
+  -> DeepSeek rerank（失败回退本地 rerank）
+  -> 邻近 chunk 扩展
   -> Context Builder 生成片段和 citations
   -> DeepSeek 基于参考片段回答
   -> 页面展示答案、可信引用、检索细节和反馈入口
@@ -253,10 +276,20 @@ python -m compileall app.py config.py src scripts
 
 ```bash
 python scripts/test_query_processor.py
+python scripts/test_query_planner.py
 python scripts/test_rrf.py
 python scripts/test_context_builder.py
+python scripts/test_reranker.py
+python scripts/test_bm25_store.py
+python scripts/test_evidence_expander.py
 python scripts/test_hybrid_retriever.py
 python scripts/test_mineru_visual_normalization.py
+```
+
+检索评估：
+
+```bash
+python scripts/eval_retrieval.py data/retrieval_seed.jsonl --disable-llm-rerank
 ```
 
 需要外部服务的连通性测试：
@@ -292,7 +325,7 @@ python scripts/cleanup_runtime_data.py --include-cache --apply
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填写 MINERU_API_TOKEN、DEEPSEEK_API_KEY、EMBEDDING_API_KEY 等配置
+# 编辑 .env，填写 MINERU_API_TOKEN、DEEPSEEK_API_KEY、EMBEDDING_API_KEY、DASHSCOPE_API_KEY 等配置
 docker compose up -d --build
 ```
 

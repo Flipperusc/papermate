@@ -70,20 +70,53 @@ class FakeBM25Store:
         ][:top_k]
 
 
+class FakeReranker:
+    def rerank(self, query_plan, candidates: list[dict], top_k: int | None = None) -> list[dict]:
+        del query_plan
+        results: list[dict] = []
+        for index, candidate in enumerate(candidates[: top_k or len(candidates)], start=1):
+            item = dict(candidate)
+            score = 1.0 / index
+            item.update(
+                {
+                    "rerank_score": score,
+                    "final_score": score,
+                    "section_boost": 0.0,
+                    "exact_overlap": 0.0,
+                    "rerank_source": "fake",
+                }
+            )
+            results.append(item)
+        return results
+
+
+class FakeEvidenceExpander:
+    def expand(self, paper_id: str, core_chunks: list[dict]) -> list[dict]:
+        del paper_id
+        return core_chunks
+
+
 def main() -> None:
     hybrid = HybridRetriever(
         vector_retriever=FakeVectorRetriever(),
         bm25_store=FakeBM25Store(),
+        reranker=FakeReranker(),
+        evidence_expander=FakeEvidenceExpander(),
     )
     result = hybrid.retrieve("paper_1", "本文用了哪些数据集？")
     assert isinstance(result, dict)
     assert "final_results" in result
     assert result["final_results"]
     assert result["strategy"] == "hybrid_rrf"
+    assert result["retrieval_details"]["candidate_count"] == 2
+    assert result["retrieval_details"]["rerank_source"] == "fake"
+    assert result["final_results"][0]["final_score"] is not None
 
     vector_fallback = HybridRetriever(
         vector_retriever=FakeVectorRetriever(),
         bm25_store=FakeBM25Store(missing=True),
+        reranker=FakeReranker(),
+        evidence_expander=FakeEvidenceExpander(),
     ).retrieve("paper_1", "dataset")
     assert vector_fallback["strategy"] == "vector_fallback"
     assert vector_fallback["final_results"][0]["retrieval_sources"] == ["vector"]
@@ -92,6 +125,8 @@ def main() -> None:
     bm25_fallback = HybridRetriever(
         vector_retriever=FakeVectorRetriever(should_fail=True),
         bm25_store=FakeBM25Store(),
+        reranker=FakeReranker(),
+        evidence_expander=FakeEvidenceExpander(),
     ).retrieve("paper_1", "dataset")
     assert bm25_fallback["strategy"] == "bm25_fallback"
     assert bm25_fallback["final_results"][0]["retrieval_sources"] == ["bm25"]

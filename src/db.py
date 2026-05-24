@@ -8,6 +8,17 @@ from pathlib import Path
 from typing import Any
 
 from config import settings
+from src.chunk_metadata import hydrate_chunk_metadata, metadata_json
+
+
+class ClosingConnection(sqlite3.Connection):
+    """SQLite connection that closes when used as a context manager."""
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        try:
+            return bool(super().__exit__(exc_type, exc_value, traceback))
+        finally:
+            self.close()
 
 
 def ensure_data_directories() -> tuple[Path, Path]:
@@ -25,7 +36,7 @@ def get_db_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = Path(db_path) if db_path is not None else settings.db_path
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(path)
+    connection = sqlite3.connect(path, factory=ClosingConnection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
@@ -123,6 +134,9 @@ def init_db(db_path: str | Path | None = None) -> None:
                 page_num INTEGER NOT NULL,
                 section_title TEXT,
                 text TEXT NOT NULL,
+                chunk_type TEXT NOT NULL DEFAULT 'text',
+                images_json TEXT NOT NULL DEFAULT '[]',
+                tables_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (paper_id) REFERENCES papers (paper_id) ON DELETE CASCADE
             );
@@ -281,6 +295,15 @@ def ensure_schema_migrations(connection: sqlite3.Connection) -> None:
             "content_list_path": "TEXT",
             "images_json": "TEXT NOT NULL DEFAULT '[]'",
             "updated_at": "TEXT",
+        },
+    )
+    ensure_columns(
+        connection,
+        "chunks",
+        {
+            "chunk_type": "TEXT NOT NULL DEFAULT 'text'",
+            "images_json": "TEXT NOT NULL DEFAULT '[]'",
+            "tables_json": "TEXT NOT NULL DEFAULT '[]'",
         },
     )
     ensure_columns(
@@ -766,9 +789,12 @@ def save_paper_and_chunks(paper: dict[str, Any], chunks: list[dict[str, Any]]) -
                 chunk_index,
                 page_num,
                 section_title,
-                text
+                text,
+                chunk_type,
+                images_json,
+                tables_json
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -778,6 +804,9 @@ def save_paper_and_chunks(paper: dict[str, Any], chunks: list[dict[str, Any]]) -
                     chunk["page_num"],
                     chunk["section_title"],
                     chunk["text"],
+                    chunk.get("chunk_type", "text"),
+                    metadata_json(chunk, "images"),
+                    metadata_json(chunk, "tables"),
                 )
                 for chunk in chunks
             ],
@@ -831,7 +860,10 @@ def get_paper_chunks(paper_id: str) -> list[dict[str, Any]]:
                 chunk_index,
                 page_num,
                 section_title,
-                text
+                text,
+                chunk_type,
+                images_json,
+                tables_json
             FROM chunks
             WHERE paper_id = ?
             ORDER BY chunk_index ASC
@@ -839,4 +871,4 @@ def get_paper_chunks(paper_id: str) -> list[dict[str, Any]]:
             (paper_id,),
         ).fetchall()
 
-    return [dict(row) for row in rows]
+    return [hydrate_chunk_metadata(dict(row)) for row in rows]
