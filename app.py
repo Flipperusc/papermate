@@ -18,6 +18,7 @@ from urllib.parse import unquote
 from uuid import uuid4
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from config import settings
 from src import __version__
@@ -101,6 +102,8 @@ BILINGUAL_ALIGNMENT_CACHE_VERSION = "header-image-notices-v2"
 QUEUE_REFRESH_SECONDS = 5
 QUEUE_HOVER_LIMIT = 10
 QUEUE_CANCEL_QUERY_PARAM = "pm_cancel_queue_job"
+SOURCE_READING_MODE = "\u539f\u6587"
+SOURCE_JUMP_LABEL = "\u56de\u5230\u539f\u6587"
 
 CARD_PALETTES = [
     {"top": "#eaf3ff", "accent": "#2563eb", "field": "#f6faff"},
@@ -1122,54 +1125,166 @@ def chunk_anchor_id(chunk_id: Any) -> str:
     return f"pm-source-{safe_id}"
 
 
-def chunk_anchor_html(chunk_id: Any) -> str:
+def chunk_anchor_html(chunk_id: Any, fallback: bool = False) -> str:
     """Return an HTML anchor marker for chunk-level source navigation."""
     anchor_id = html.escape(chunk_anchor_id(chunk_id), quote=True)
-    return f'<span id="{anchor_id}" class="pm-source-anchor"></span>'
+    fallback_attr = ' data-anchor-fallback="true"' if fallback else ""
+    return f'<span id="{anchor_id}" class="pm-source-anchor"{fallback_attr}></span>'
 
 
-def source_anchor_link(chunk_id: Any, label: str = "回到原文") -> str:
-    """Return a small HTML link that navigates to a chunk anchor."""
-    anchor_id = html.escape(chunk_anchor_id(chunk_id), quote=True)
-    return f'<a class="pm-source-link" href="#{anchor_id}">{html.escape(label)}</a>'
+def request_source_jump(chunk_id: Any) -> None:
+    """Request original-reader mode and scroll to the chunk anchor on rerun."""
+    clean_chunk_id = str(chunk_id or "").strip()
+    if not clean_chunk_id:
+        return
+    st.session_state["pm_pending_source_anchor"] = chunk_anchor_id(clean_chunk_id)
+    st.rerun()
+
+
+def source_jump_button_key(prefix: str, chunk_id: Any) -> str:
+    """Build a stable Streamlit key for one source-jump button."""
+    digest = hashlib.sha1(str(chunk_id or "").encode("utf-8")).hexdigest()[:12]
+    safe_prefix = re.sub(r"[^A-Za-z0-9_-]+", "_", str(prefix or "source")).strip("_")
+    return f"source_jump_{safe_prefix}_{digest}"
+
+
+def render_source_jump_button(chunk_id: Any, key_prefix: str, label: str = SOURCE_JUMP_LABEL) -> None:
+    """Render a reliable button for jumping from QA evidence to source text."""
+    clean_chunk_id = str(chunk_id or "").strip()
+    if st.button(
+        label,
+        key=source_jump_button_key(key_prefix, clean_chunk_id),
+        disabled=not clean_chunk_id,
+        use_container_width=False,
+    ):
+        request_source_jump(clean_chunk_id)
 
 
 def add_chunk_anchors_to_markdown(
     markdown: str,
     chunks: list[dict[str, Any]],
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Insert chunk anchors into Markdown when chunk text can be located."""
+    """Insert chunk anchors into Markdown, with page/order fallbacks for misses."""
     if not markdown or not chunks:
         return markdown, chunks
 
     normalized_markdown, offset_map = normalize_with_offsets(markdown)
-    inserts: list[tuple[int, str]] = []
+    inserts_by_position: dict[int, list[str]] = {}
     missing_chunks: list[dict[str, Any]] = []
-    used_positions: set[int] = set()
+    matched_chunks: list[dict[str, Any]] = []
+    next_search_start = 0
 
-    for chunk in chunks:
-        candidate = chunk_search_candidate(str(chunk.get("text") or ""))
-        normalized_candidate, _ = normalize_with_offsets(candidate)
-        if len(normalized_candidate) < 24:
+    for ordinal, chunk in enumerate(chunks):
+        chunk_id = str(chunk.get("chunk_id") or "").strip()
+        if not chunk_id:
             missing_chunks.append(chunk)
             continue
 
-        match_position = normalized_markdown.find(normalized_candidate)
-        if match_position < 0:
+        match = find_chunk_anchor_match(normalized_markdown, offset_map, chunk, next_search_start)
+        if match is None:
             missing_chunks.append(chunk)
             continue
 
-        original_position = offset_map[match_position]
-        while original_position in used_positions and original_position < len(markdown):
-            original_position += 1
-        used_positions.add(original_position)
-        inserts.append((original_position, chunk_anchor_html(chunk.get("chunk_id"))))
+        original_position, normalized_position = match
+        inserts_by_position.setdefault(original_position, []).append(chunk_anchor_html(chunk_id))
+        matched_chunks.append(
+            {
+                "chunk": chunk,
+                "position": original_position,
+                "chunk_index": chunk_sort_index(chunk, ordinal),
+                "page_num": chunk_page_num(chunk),
+            }
+        )
+        next_search_start = min(len(normalized_markdown), max(next_search_start, normalized_position + 1))
+
+    for ordinal, chunk in enumerate(missing_chunks):
+        chunk_id = str(chunk.get("chunk_id") or "").strip()
+        if not chunk_id:
+            continue
+        position = fallback_chunk_anchor_position(chunk, matched_chunks, ordinal)
+        inserts_by_position.setdefault(position, []).append(chunk_anchor_html(chunk_id, fallback=True))
 
     anchored_markdown = markdown
-    for position, anchor in sorted(inserts, key=lambda item: item[0], reverse=True):
-        anchored_markdown = f"{anchored_markdown[:position]}{anchor}\n{anchored_markdown[position:]}"
+    for position, anchors in sorted(inserts_by_position.items(), key=lambda item: item[0], reverse=True):
+        anchor_html = "\n".join(anchors)
+        anchored_markdown = f"{anchored_markdown[:position]}{anchor_html}\n{anchored_markdown[position:]}"
 
     return anchored_markdown, missing_chunks
+
+
+def find_chunk_anchor_match(
+    normalized_markdown: str,
+    offset_map: list[int],
+    chunk: dict[str, Any],
+    search_start: int = 0,
+) -> tuple[int, int] | None:
+    """Return original and normalized positions for a chunk text match."""
+    if not normalized_markdown or not offset_map:
+        return None
+
+    for candidate in chunk_search_candidates(str(chunk.get("text") or "")):
+        normalized_candidate, _ = normalize_with_offsets(candidate)
+        if len(normalized_candidate) < 24:
+            continue
+
+        match_position = normalized_markdown.find(normalized_candidate, max(0, search_start))
+        if match_position < 0 and search_start > 0:
+            match_position = normalized_markdown.find(normalized_candidate)
+        if match_position >= 0:
+            return offset_map[match_position], match_position
+    return None
+
+
+def fallback_chunk_anchor_position(
+    chunk: dict[str, Any],
+    matched_chunks: list[dict[str, Any]],
+    ordinal: int,
+) -> int:
+    """Pick the nearest already-located source position for an unmatched chunk."""
+    if not matched_chunks:
+        return 0
+
+    chunk_index = chunk_sort_index(chunk, ordinal)
+    page_num = chunk_page_num(chunk)
+    candidates = [
+        matched
+        for matched in matched_chunks
+        if page_num is not None and matched.get("page_num") == page_num
+    ]
+    if not candidates:
+        candidates = matched_chunks
+
+    nearest = min(
+        candidates,
+        key=lambda matched: (
+            abs(int(matched.get("chunk_index", 0)) - chunk_index),
+            int(matched.get("chunk_index", 0)),
+        ),
+    )
+    return max(0, int(nearest.get("position") or 0))
+
+
+def chunk_sort_index(chunk: dict[str, Any], fallback: int = 0) -> int:
+    """Return a numeric chunk order for fallback anchor placement."""
+    value = chunk.get("chunk_index")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+
+    match = re.search(r"(?:chunk[_-])?(\d+)\s*$", str(chunk.get("chunk_id") or ""))
+    if match:
+        return int(match.group(1))
+    return int(fallback)
+
+
+def chunk_page_num(chunk: dict[str, Any]) -> int | None:
+    """Return a numeric page value when the chunk has one."""
+    try:
+        page_num = int(chunk.get("page_num") or 0)
+    except (TypeError, ValueError):
+        return None
+    return page_num if page_num > 0 else None
 
 
 def normalize_with_offsets(text: str) -> tuple[str, list[int]]:
@@ -1199,11 +1314,67 @@ def normalize_with_offsets(text: str) -> tuple[str, list[int]]:
 
 def chunk_search_candidate(text: str) -> str:
     """Pick a stable searchable prefix from a chunk."""
-    cleaned = re.sub(r"\s+", " ", text).strip()
-    cleaned = re.sub(r"\*\*此处图片\d+已省略\*\*", " ", cleaned)
+    candidates = chunk_search_candidates(text)
+    return candidates[0] if candidates else ""
+
+
+def chunk_search_candidates(text: str) -> list[str]:
+    """Build searchable snippets from several positions inside a chunk."""
+    cleaned = clean_chunk_search_text(text)
     if not cleaned:
-        return ""
-    return cleaned[: min(220, len(cleaned))]
+        return []
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add_candidate(candidate: str) -> None:
+        normalized_candidate, _ = normalize_with_offsets(candidate)
+        if len(normalized_candidate) < 24:
+            return
+        if normalized_candidate in seen:
+            return
+        seen.add(normalized_candidate)
+        candidates.append(candidate.strip())
+
+    for length in (220, 160, 120, 80, 48):
+        add_candidate(cleaned[: min(length, len(cleaned))])
+
+    words = cleaned.split()
+    if len(words) >= 8:
+        for window_size in (36, 28, 20, 14, 10):
+            if len(words) < window_size:
+                continue
+            starts = {
+                0,
+                max(0, len(words) // 4),
+                max(0, len(words) // 2),
+                max(0, len(words) - window_size),
+            }
+            for start in sorted(starts):
+                add_candidate(" ".join(words[start : start + window_size]))
+    else:
+        for length in (160, 120, 80, 48):
+            if len(cleaned) <= length:
+                continue
+            starts = {
+                0,
+                max(0, len(cleaned) // 4),
+                max(0, len(cleaned) // 2),
+                max(0, len(cleaned) - length),
+            }
+            for start in sorted(starts):
+                add_candidate(cleaned[start : start + length])
+
+    return candidates
+
+
+def clean_chunk_search_text(text: str) -> str:
+    """Remove generated display notices before source-position matching."""
+    cleaned = str(text or "")
+    cleaned = re.sub(r"\*\*(?:此处图片|姝ゅ鍥剧墖)\d+[^*]*\*\*", " ", cleaned)
+    cleaned = re.sub(r"\[(?:此处含有图|姝ゅ鍚湁鍥?)[^\]]*\]\([^)]*\)", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 def get_uploaded_file_signature(uploaded_file: UploadedFile) -> str:
@@ -1491,7 +1662,10 @@ def render_source_chunks(source_chunks: list[dict[str, Any]]) -> None:
             f"{chunk.get('chunk_type', 'text')} | {chunk.get('chunk_id', '')}"
         )
         with st.expander(title):
-            st.markdown(source_anchor_link(chunk.get("chunk_id")), unsafe_allow_html=True)
+            render_source_jump_button(
+                chunk.get("chunk_id"),
+                f"source_chunk_{source_id}_{chunk.get('chunk_id', '')}",
+            )
             image_count = chunk_metadata_count(chunk, "images")
             table_count = chunk_metadata_count(chunk, "tables")
             if image_count or table_count:
@@ -2813,7 +2987,10 @@ def render_reference_card(ref: dict[str, Any], index: int, expanded: bool = Fals
         """,
         unsafe_allow_html=True,
     )
-    st.markdown(source_anchor_link(ref.get("chunk_id"), "回到原文"), unsafe_allow_html=True)
+    render_source_jump_button(
+        ref.get("chunk_id"),
+        f"citation_{index}_{citation_id}_{ref.get('chunk_id', '')}",
+    )
 
 
 def render_citations(citations: list[dict[str, Any]]) -> None:
@@ -2837,6 +3014,7 @@ def render_qa_box(paper_id: str) -> None:
     index_state = local_index_state(paper_id)
     index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
     index_busy = index_state["vector"] in {"排队中", "构建中"} or index_state["bm25"] in {"排队中", "构建中"}
+    st.markdown('<span id="pm-qa-anchor" class="pm-qa-anchor"></span>', unsafe_allow_html=True)
     header_cols = st.columns([0.48, 0.16, 0.36], gap="small", vertical_alignment="center")
     with header_cols[0]:
         st.markdown('<h3 class="pm-section-title">Ask PaperMate</h3>', unsafe_allow_html=True)
@@ -3947,6 +4125,59 @@ def inject_global_css() -> None:
           margin-top: 4px;
         }
         .pm-source-anchor { display: block; scroll-margin-top: 18px; height: 1px; }
+        .pm-source-highlight {
+          border-radius: 8px;
+          outline: 2px solid rgba(245,158,11,.72);
+          background: rgba(254,240,138,.58) !important;
+          box-shadow: 0 0 0 5px rgba(245,158,11,.16);
+          transition: background 220ms ease, box-shadow 220ms ease, outline-color 220ms ease;
+          animation: pm-source-highlight-pulse 2600ms ease 1;
+        }
+        @keyframes pm-source-highlight-pulse {
+          0% {
+            background: rgba(251,191,36,.78);
+            box-shadow: 0 0 0 8px rgba(245,158,11,.24);
+          }
+          55% {
+            background: rgba(254,240,138,.62);
+            box-shadow: 0 0 0 5px rgba(245,158,11,.16);
+          }
+          100% {
+            background: rgba(254,240,138,.42);
+            box-shadow: 0 0 0 4px rgba(245,158,11,.10);
+          }
+        }
+        .pm-qa-anchor {
+          display: block;
+          height: 1px;
+          scroll-margin-top: 18px;
+        }
+        .pm-return-qa-button {
+          position: fixed;
+          right: 24px;
+          bottom: 24px;
+          z-index: 2147483647;
+          border: 1px solid rgba(37,99,235,.28);
+          border-radius: 999px;
+          background: #1D4ED8;
+          color: #fff;
+          padding: 10px 14px;
+          font-size: 13px;
+          font-weight: 850;
+          line-height: 1;
+          box-shadow: 0 12px 30px rgba(15,23,42,.22);
+          cursor: pointer;
+        }
+        .pm-return-qa-button:hover {
+          background: #1E40AF;
+        }
+        @media (max-width: 760px) {
+          .pm-return-qa-button {
+            right: 14px;
+            bottom: 14px;
+            padding: 10px 12px;
+          }
+        }
         .pm-literature-card {
           padding: 15px;
           margin-bottom: 12px;
@@ -6059,6 +6290,91 @@ def read_original_markdown(processed_pdf: dict[str, Any]) -> tuple[str, Path | N
     return parsed_pdf.get("markdown", "") or chunk_markdown or processed_pdf.get("preview", ""), markdown_path
 
 
+def render_pending_source_scroll() -> None:
+    """Execute a pending scroll to a source anchor after the reader is rendered."""
+    anchor_id = str(st.session_state.pop("pm_pending_source_anchor", "") or "").strip()
+    if not anchor_id:
+        return
+
+    components.html(
+        f"""
+        <script>
+        const anchorId = {json.dumps(anchor_id)};
+        const qaAnchorId = "pm-qa-anchor";
+        const sourceHighlightSelector = ".pm-source-highlight";
+
+        const getHighlightTarget = (anchor) => {{
+          const contentSelector = "p, li, h1, h2, h3, h4, h5, h6, blockquote, pre, table";
+          if (anchor.parentElement && anchor.parentElement.matches(contentSelector)) {{
+            return anchor.parentElement;
+          }}
+
+          let element = anchor.nextElementSibling;
+          while (element) {{
+            if (element.matches(contentSelector)) {{
+              return element;
+            }}
+            const nested = element.querySelector?.(contentSelector);
+            if (nested) {{
+              return nested;
+            }}
+            element = element.nextElementSibling;
+          }}
+
+          const container = anchor.closest("[data-testid='stMarkdownContainer'], .stMarkdown");
+          return container || anchor.parentElement || anchor;
+        }};
+
+        const highlightSourceAnchor = (target) => {{
+          const parentDocument = window.parent.document;
+          parentDocument
+            .querySelectorAll(sourceHighlightSelector)
+            .forEach((element) => element.classList.remove("pm-source-highlight"));
+
+          const highlightTarget = getHighlightTarget(target);
+          if (highlightTarget) {{
+            highlightTarget.classList.add("pm-source-highlight");
+          }}
+        }};
+
+        const ensureReturnToQaButton = () => {{
+          const parentDocument = window.parent.document;
+          parentDocument.getElementById("pm-return-qa-button")?.remove();
+
+          const button = parentDocument.createElement("button");
+          button.id = "pm-return-qa-button";
+          button.type = "button";
+          button.className = "pm-return-qa-button";
+          button.textContent = "回到问答区";
+          button.addEventListener("click", () => {{
+            const qaAnchor = parentDocument.getElementById(qaAnchorId);
+            if (qaAnchor) {{
+              qaAnchor.scrollIntoView({{ behavior: "smooth", block: "start", inline: "nearest" }});
+            }}
+            button.remove();
+          }});
+          parentDocument.body.appendChild(button);
+        }};
+
+        const scrollToSourceAnchor = () => {{
+          const parentDocument = window.parent.document;
+          const target = parentDocument.getElementById(anchorId);
+          if (!target) {{
+            return;
+          }}
+          target.scrollIntoView({{ behavior: "smooth", block: "start", inline: "nearest" }});
+          highlightSourceAnchor(target);
+          ensureReturnToQaButton();
+        }};
+        window.setTimeout(scrollToSourceAnchor, 80);
+        window.setTimeout(scrollToSourceAnchor, 360);
+        </script>
+        """,
+        height=0,
+        scrolling=False,
+    )
+
+
 def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
     """Render original, Chinese, or interleaved bilingual Markdown for reading."""
     parsed_pdf = processed_pdf["parsed_pdf"]
@@ -6073,6 +6389,9 @@ def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
     else:
         zh_path = parsed_translated_markdown_path(parsed_pdf) or translated_markdown_output_path(markdown_path)
     zh_exists = bool(zh_path and zh_path.exists())
+
+    if st.session_state.get("pm_pending_source_anchor"):
+        st.session_state["reading_mode"] = SOURCE_READING_MODE
 
     reading_mode = render_segmented_choice("阅读模式", ["原文", "中文译文", "双语对照"], "reading_mode", "原文")
     align_label = st.session_state.get("bilingual_align_mode")
@@ -6190,6 +6509,7 @@ def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
         images,
         f"reader_{paper_id}_source",
     )
+    render_pending_source_scroll()
 
 
 def render_app() -> None:
