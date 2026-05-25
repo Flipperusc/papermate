@@ -14,7 +14,7 @@ import re
 import zipfile
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from uuid import uuid4
 
 import streamlit as st
@@ -39,6 +39,7 @@ from src.errors import (
 from src.feedback_service import FEEDBACK_OPTIONS, list_bad_cases, list_feedback_records, save_feedback
 from src.job_service import (
     cancel_job,
+    cancel_queued_job,
     clear_team_queued_jobs,
     enqueue_job,
     latest_job_for_paper,
@@ -99,6 +100,8 @@ logger = get_logger(__name__)
 BILINGUAL_ALIGNMENT_CACHE_VERSION = "header-image-notices-v2"
 QUEUE_REFRESH_SECONDS = 5
 QUEUE_HOVER_LIMIT = 10
+QUEUE_CANCEL_QUERY_PARAM = "pm_cancel_queue_job"
+INDEX_REFRESH_QUERY_PARAM = "pm_refresh_index"
 
 CARD_PALETTES = [
     {"top": "#eaf3ff", "accent": "#2563eb", "field": "#f6faff"},
@@ -1291,6 +1294,53 @@ def process_uploaded_pdf(
     return result
 
 
+def index_state_from_paper_status(
+    index_status: str,
+    vector_status: str = "未知",
+    bm25_status: str = "未知",
+    overwrite: bool = False,
+) -> tuple[str, str]:
+    """Map persisted paper index status to the two UI badges."""
+    clean_status = str(index_status or "").strip().lower()
+    if clean_status == "succeeded":
+        return "已构建", "已构建"
+    status_label = {
+        "queued": "排队中",
+        "running": "构建中",
+        "failed": "失败",
+    }.get(clean_status)
+    if not status_label:
+        return vector_status, bm25_status
+    if overwrite:
+        return status_label, status_label
+    return (
+        vector_status if vector_status != "未知" else status_label,
+        bm25_status if bm25_status != "未知" else status_label,
+    )
+
+
+def refresh_index_status_for_paper(paper_id: str, rerun: bool = True) -> None:
+    """Clear cached index UI state, reload paper metadata, and rerun the page."""
+    clean_paper_id = str(paper_id or "").strip()
+    if clean_paper_id:
+        st.session_state.pop(f"index_state_{clean_paper_id}", None)
+    processed_pdf = st.session_state.get("processed_pdf")
+    current_paper_id = str((processed_pdf or {}).get("saved_file", {}).get("paper_id") or "")
+    if processed_pdf and clean_paper_id and current_paper_id == clean_paper_id:
+        try:
+            refresh_workspace_paper(processed_pdf)
+        except Exception:
+            logger.exception("Index status refresh failed. paper_id=%s", clean_paper_id)
+    st.session_state["pm_workspace_notice"] = "已刷新索引状态。"
+    if rerun:
+        st.rerun()
+
+
+def index_refresh_href(paper_id: str) -> str:
+    """Return the compact Ask PaperMate refresh action URL."""
+    return f"?{INDEX_REFRESH_QUERY_PARAM}={quote(str(paper_id or ''))}"
+
+
 def local_index_state(paper_id: str, allow_db: bool = True) -> dict[str, str]:
     """Return UI-only index status without triggering remote embedding calls."""
     state_key = f"index_state_{paper_id}"
@@ -1298,41 +1348,37 @@ def local_index_state(paper_id: str, allow_db: bool = True) -> dict[str, str]:
     vector_status = str(state.get("vector") or "未知")
     bm25_status = str(state.get("bm25") or "未知")
 
+    if allow_db:
+        try:
+            paper = get_accessible_paper(paper_id, current_user_id())
+        except Exception:
+            paper = None
+        if paper:
+            vector_status, bm25_status = index_state_from_paper_status(
+                str(paper.get("index_status") or ""),
+                vector_status,
+                bm25_status,
+                overwrite=True,
+            )
+
     if vector_status == "未知" or bm25_status == "未知":
         session_paper = st.session_state.get("processed_pdf") or {}
         session_paper_id = str((session_paper.get("saved_file") or {}).get("paper_id") or "")
         index_status = str(session_paper.get("index_status") or "")
         if paper_id and session_paper_id == str(paper_id) and index_status:
-            if index_status == "succeeded":
-                vector_status = "已构建"
-                bm25_status = "已构建"
-            elif index_status == "queued":
-                vector_status = vector_status if vector_status != "未知" else "排队中"
-                bm25_status = bm25_status if bm25_status != "未知" else "排队中"
-            elif index_status == "running":
-                vector_status = vector_status if vector_status != "未知" else "构建中"
-                bm25_status = bm25_status if bm25_status != "未知" else "构建中"
-            elif index_status == "failed":
-                vector_status = vector_status if vector_status != "未知" else "失败"
-                bm25_status = bm25_status if bm25_status != "未知" else "失败"
+            vector_status, bm25_status = index_state_from_paper_status(index_status, vector_status, bm25_status)
 
     if allow_db and (vector_status == "未知" or bm25_status == "未知"):
         try:
             paper = get_accessible_paper(paper_id, current_user_id())
         except Exception:
             paper = None
-        if paper and paper.get("index_status") == "succeeded":
-            vector_status = "已构建"
-            bm25_status = "已构建"
-        elif paper and paper.get("index_status") == "queued":
-            vector_status = vector_status if vector_status != "未知" else "排队中"
-            bm25_status = bm25_status if bm25_status != "未知" else "排队中"
-        elif paper and paper.get("index_status") == "running":
-            vector_status = vector_status if vector_status != "未知" else "构建中"
-            bm25_status = bm25_status if bm25_status != "未知" else "构建中"
-        elif paper and paper.get("index_status") == "failed":
-            vector_status = vector_status if vector_status != "未知" else "失败"
-            bm25_status = bm25_status if bm25_status != "未知" else "失败"
+        if paper:
+            vector_status, bm25_status = index_state_from_paper_status(
+                str(paper.get("index_status") or ""),
+                vector_status,
+                bm25_status,
+            )
 
     bm25_payload = settings.bm25_dir / f"{paper_id}_payloads.json"
     bm25_pickle = settings.bm25_dir / f"{paper_id}_bm25.pkl"
@@ -2091,6 +2137,11 @@ def queue_row_state_label(job: dict[str, Any]) -> str:
     return state
 
 
+def queue_remove_href(job_id: Any) -> str:
+    """Return the URL used by the queue hover panel to remove one queued job."""
+    return f"?{QUEUE_CANCEL_QUERY_PARAM}={html.escape(str(job_id))}"
+
+
 def render_queue_rows(queued_jobs: list[dict[str, Any]], queued_count: int) -> str:
     """Render up to QUEUE_HOVER_LIMIT queued papers for the hover panel."""
     if not queued_jobs:
@@ -2101,12 +2152,19 @@ def render_queue_rows(queued_jobs: list[dict[str, Any]], queued_count: int) -> s
         paper_label = queue_job_paper_label(job)
         job_id = job.get("job_id")
         state_label = queue_row_state_label(job)
+        remove_link = ""
+        if str(job.get("status") or "") == "queued":
+            remove_link = (
+                f'<a class="pm-queue-remove" href="{queue_remove_href(job_id)}" '
+                'title="移除队列任务" aria-label="移除队列任务">×</a>'
+            )
         rows.append(
             (
                 '<div class="pm-queue-row">'
                 f'<div class="pm-queue-type">{html.escape(job_type)}</div>'
                 f'<div class="pm-queue-paper" title="{html.escape(paper_label)}">{html.escape(paper_label)}</div>'
                 f'<div class="pm-queue-meta">#{html.escape(str(job_id))} · {html.escape(state_label)}</div>'
+                f"{remove_link}"
                 "</div>"
             )
         )
@@ -2154,7 +2212,11 @@ def render_global_queue_progress(user_id: int, team_id: int) -> None:
         if queued_count
         else "后台队列空闲"
     )
-    subtitle = "每 5 秒自动刷新 · 悬停查看排队论文" if has_active_work else "没有正在处理的解析或索引任务"
+    subtitle = (
+        "每 5 秒自动刷新 · 悬停查看排队论文"
+        if has_active_work
+        else "没有正在处理的解析或索引任务"
+    )
     queued_title = f"排队论文（最多显示 {QUEUE_HOVER_LIMIT} 条，共 {queued_count} 条）"
     lanes_html = (
         "\n".join(
@@ -2240,6 +2302,79 @@ def render_queue_clear_notice() -> None:
         st.toast(str(notice))
 
 
+
+
+def render_queue_action_notice() -> None:
+    """Show a short notice after a queue item action."""
+    notice = st.session_state.pop("pm_queue_action_notice", None)
+    if notice:
+        st.toast(str(notice))
+
+
+def handle_queue_cancel_query(user_id: int) -> None:
+    """Handle queue item removal links emitted inside the HTML hover panel."""
+    try:
+        raw_job_id = st.query_params.get(QUEUE_CANCEL_QUERY_PARAM)
+    except Exception:
+        return
+    if isinstance(raw_job_id, list):
+        raw_job_id = raw_job_id[0] if raw_job_id else ""
+    if not raw_job_id:
+        return
+
+    try:
+        job_id = int(str(raw_job_id))
+        removed = cancel_queued_job(int(user_id), job_id)
+        st.session_state["pm_queue_action_notice"] = (
+            f"已移除队列任务 #{job_id}。"
+            if removed
+            else f"任务 #{job_id} 不在排队中，未移除。"
+        )
+    except Exception as exc:  # pragma: no cover - defensive UI guard
+        logger.warning("Queue job removal failed. job_id=%s error=%s", raw_job_id, exc)
+        st.session_state["pm_queue_action_notice"] = f"移除队列任务失败：{exc}"
+    finally:
+        try:
+            del st.query_params[QUEUE_CANCEL_QUERY_PARAM]
+        except Exception:
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+        st.rerun()
+
+
+def handle_index_refresh_query(user_id: int) -> None:
+    """Handle compact Ask PaperMate index refresh links."""
+    try:
+        raw_paper_id = st.query_params.get(INDEX_REFRESH_QUERY_PARAM)
+    except Exception:
+        return
+    if isinstance(raw_paper_id, list):
+        raw_paper_id = raw_paper_id[0] if raw_paper_id else ""
+    paper_id = str(raw_paper_id or "").strip()
+    if not paper_id:
+        return
+
+    try:
+        refresh_index_status_for_paper(paper_id, rerun=False)
+    except Exception as exc:  # pragma: no cover - defensive UI guard
+        logger.warning(
+            "Index status refresh query failed. user_id=%s paper_id=%s error=%s",
+            user_id,
+            paper_id,
+            exc,
+        )
+        st.session_state["pm_workspace_notice"] = f"刷新索引状态失败：{exc}"
+    finally:
+        try:
+            del st.query_params[INDEX_REFRESH_QUERY_PARAM]
+        except Exception:
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+        st.rerun()
 
 
 def render_app_shell() -> None:
@@ -2559,6 +2694,12 @@ def render_index_builder(chunks: list[dict[str, Any]]) -> None:
                 st.info(f"索引任务已在队列中：#{job_id}。worker 会按顺序构建。")
             else:
                 st.success(f"论文索引已入队：#{job_id}。worker 会在后台构建 Chroma 与 BM25 索引。")
+            st.session_state["pm_workspace_notice"] = (
+                f"索引任务已在队列中：#{job_id}。worker 会按顺序构建。"
+                if reused_existing
+                else f"论文索引已入队：#{job_id}。worker 会在后台构建 Chroma 与 BM25 索引。"
+            )
+            st.rerun()
         except Exception as exc:
             logger.exception("Index job enqueue failed. paper_id=%s", paper_id)
             render_error_card("索引任务创建失败", "请检查团队权限和数据库状态。", str(exc))
@@ -2744,9 +2885,12 @@ def render_qa_box(paper_id: str) -> None:
             <div>
               <h3 class="pm-section-title">Ask PaperMate</h3>
             </div>
-            <div class="pm-badges">
-              {render_status_badge(f"向量 {index_state['vector']}", index_status_type(index_state['vector']))}
-              {render_status_badge(f"BM25 {index_state['bm25']}", index_status_type(index_state['bm25']))}
+            <div class="pm-ask-heading-actions">
+              <a class="pm-small-refresh" href="{index_refresh_href(paper_id)}" title="刷新索引状态">刷新</a>
+              <div class="pm-badges">
+                {render_status_badge(f"向量 {index_state['vector']}", index_status_type(index_state['vector']))}
+                {render_status_badge(f"BM25 {index_state['bm25']}", index_status_type(index_state['bm25']))}
+              </div>
             </div>
           </div>
         </div>
@@ -3480,7 +3624,9 @@ def inject_global_css() -> None:
           grid-template-columns: 64px minmax(0, 1fr) 88px;
           gap: 8px;
           align-items: center;
+          position: relative;
           padding: 8px 0;
+          padding-right: 24px;
           border-top: 1px solid #EEF2F7;
           font-size: 12px;
         }
@@ -3503,6 +3649,37 @@ def inject_global_css() -> None:
           color: var(--pm-muted);
           text-align: right;
           white-space: nowrap;
+        }
+        .pm-queue-remove {
+          position: absolute;
+          right: 0;
+          top: 50%;
+          transform: translateY(-50%);
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 20px;
+          height: 20px;
+          border-radius: 50%;
+          color: #64748B;
+          background: rgba(241,245,249,.96);
+          border: 1px solid rgba(148,163,184,.36);
+          text-decoration: none;
+          font-size: 15px;
+          font-weight: 850;
+          line-height: 1;
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+        }
+        .pm-queue-row:hover .pm-queue-remove {
+          opacity: 1;
+          pointer-events: auto;
+        }
+        .pm-queue-remove:hover {
+          color: #B91C1C;
+          background: #FEE2E2;
+          border-color: rgba(248,113,113,.56);
         }
         .pm-queue-empty, .pm-queue-more {
           color: var(--pm-muted);
@@ -3624,6 +3801,41 @@ def inject_global_css() -> None:
         .pm-section-card, .pm-panel {
           padding: 17px;
           margin-bottom: 14px;
+        }
+        .pm-section-heading {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .pm-ask-heading-actions {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .pm-small-refresh {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 26px;
+          padding: 0 9px;
+          border: 1px solid rgba(99,102,241,.24);
+          border-radius: 8px;
+          background: #F8FAFF;
+          color: #3730A3;
+          font-size: 12px;
+          font-weight: 850;
+          line-height: 1;
+          text-decoration: none;
+          white-space: nowrap;
+        }
+        .pm-small-refresh:hover {
+          background: #EEF2FF;
+          border-color: rgba(79,70,229,.4);
+          color: #312E81;
+          text-decoration: none;
         }
         .pm-section-title {
           margin: 0;
@@ -4632,6 +4844,9 @@ def render_paper_library_page() -> None:
             render_status_badge(f"角色 {team_context['role']}", "info"),
         ],
     )
+    library_notice = st.session_state.pop("pm_library_notice", None)
+    if library_notice:
+        st.success(str(library_notice))
     projects = team_context["projects"]
     project_options = [0, *[int(project["project_id"]) for project in projects]]
     filter_cols = st.columns([0.24, 0.20, 0.20, 0.36], gap="small")
@@ -4883,6 +5098,11 @@ def render_paper_library_page() -> None:
                         st.info(f"索引任务已在队列中：#{job_id}。")
                     else:
                         st.success(f"索引任务已入队：#{job_id}。")
+                    st.session_state["pm_library_notice"] = (
+                        f"索引任务已在队列中：#{job_id}。"
+                        if reused_existing
+                        else f"索引任务已入队：#{job_id}。"
+                    )
                     st.rerun()
                 except Exception as exc:
                     logger.exception("Library index enqueue failed. paper_id=%s", selected_paper_id)
@@ -6048,13 +6268,15 @@ def render_app() -> None:
         render_auth_page()
         return
 
+    handle_queue_cancel_query(int(user["user_id"]))
+    handle_index_refresh_query(int(user["user_id"]))
     prepare_user_workspace_once(int(user["user_id"]))
     page = render_sidebar_navigation(user)
     team_context = current_team_context()
     selected_team_id = int(team_context.get("team_id") or 0)
     if selected_team_id:
-        clear_queue_for_ui_session_once(int(user["user_id"]), team_context)
         render_queue_clear_notice()
+        render_queue_action_notice()
         render_global_queue_progress(int(user["user_id"]), selected_team_id)
 
     if page == "论文工作台":

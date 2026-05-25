@@ -168,10 +168,18 @@ class VectorStore:
 
 def collection_name_for_embedding(embedding_client: EmbeddingClient) -> str:
     """Return a Chroma collection name that avoids cross-provider dimension conflicts."""
-    version_suffix = re.sub(r"[^A-Za-z0-9._-]+", "_", RETRIEVAL_INDEX_VERSION).strip("._-")
+    version_suffix = safe_chroma_collection_name(RETRIEVAL_INDEX_VERSION, max_length=48)
     if embedding_client.provider not in ZHIPU_PROVIDERS:
-        return f"{COLLECTION_NAME}_{version_suffix}"[:63]
+        return safe_chroma_collection_name(f"{COLLECTION_NAME}_{version_suffix}")
 
-    suffix = re.sub(r"[^A-Za-z0-9._-]+", "_", embedding_client.identity()).strip("._-")
-    return f"{COLLECTION_NAME}_{suffix}_{version_suffix}"[:63]
+    suffix = safe_chroma_collection_name(embedding_client.identity(), max_length=32)
+    return safe_chroma_collection_name(f"{COLLECTION_NAME}_{suffix}_{version_suffix}")
 
+
+def safe_chroma_collection_name(value: str, max_length: int = 63) -> str:
+    """Return a Chroma-compatible collection name after truncation."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "")).strip("._-")
+    cleaned = cleaned[: max(3, int(max_length))].strip("._-")
+    if len(cleaned) >= 3:
+        return cleaned
+    return (cleaned + "_idx")[:3].strip("._-") or "idx"

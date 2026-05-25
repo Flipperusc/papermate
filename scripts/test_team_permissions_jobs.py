@@ -17,8 +17,10 @@ from src import db as db_module
 from src.db import get_db_connection, init_db
 from src.job_service import (
     cancel_job,
+    cancel_queued_job,
     clear_team_queued_jobs,
     claim_next_job,
+    complete_job,
     enqueue_job,
     get_job,
     list_jobs,
@@ -41,6 +43,7 @@ def main() -> None:
     test_claim_next_job_type_lanes_and_paper_mutex()
     test_requeue_running_jobs_restores_paper_status()
     test_clear_team_queued_jobs_restores_manual_status()
+    test_cancel_queued_job_restores_manual_status()
     suffix = uuid4().hex[:10]
     owner = create_user(f"pm_owner_{suffix}", "password123")
     member = create_user(f"pm_member_{suffix}", "password123")
@@ -188,6 +191,7 @@ def test_claim_next_job_type_lanes_and_paper_mutex() -> None:
             assert claimed_index is not None
             assert int(claimed_index["job_id"]) == index_b_id
             assert claimed_index["paper_id"] == paper_b
+            complete_job(index_b_id, {"paper_id": paper_b})
             assert get_job(index_a_id)["status"] == "queued"
             index_c_id = enqueue_job(
                 "index",
@@ -206,6 +210,7 @@ def test_claim_next_job_type_lanes_and_paper_mutex() -> None:
                 payload={"paper_id": paper_d},
             )
             lane_summary = queue_progress_summary(int(owner["user_id"]), team_id)
+            assert "recent" not in lane_summary
             assert int(lane_summary["blocked_by_type"]["index"]["job_id"]) in {index_a_id, index_c_id}
             assert int(lane_summary["queued_by_type"]["index"]["job_id"]) == index_d_id
             claimed_next_index = claim_next_job(job_types=("index",))
@@ -342,12 +347,57 @@ def test_clear_team_queued_jobs_restores_manual_status() -> None:
             object.__setattr__(db_module.settings, "db_path", original_db_path)
 
 
+def test_cancel_queued_job_restores_manual_status() -> None:
+    """Verify removing one queued job from the hover panel restores paper status."""
+    original_db_path = db_module.settings.db_path
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        temp_db_path = Path(tmp_dir) / "papermate-cancel-one-queue-test.db"
+        object.__setattr__(db_module.settings, "db_path", temp_db_path)
+        try:
+            init_db(force=True)
+            suffix = uuid4().hex[:10]
+            owner = create_user(f"pm_cancel_queue_owner_{suffix}", "password123")
+            workspace = ensure_user_workspace(int(owner["user_id"]))
+            team_id = int(workspace["team_id"])
+            project_id = int(workspace["project_id"])
+            paper_id = f"paper-cancel-queue-{suffix}"
+            insert_test_paper(
+                paper_id,
+                int(owner["user_id"]),
+                team_id,
+                project_id,
+                parse_status="succeeded",
+                index_status="queued",
+            )
+            index_job_id = enqueue_job(
+                "index",
+                user_id=int(owner["user_id"]),
+                team_id=team_id,
+                project_id=project_id,
+                paper_id=paper_id,
+                payload={"paper_id": paper_id},
+            )
+
+            assert cancel_queued_job(int(owner["user_id"]), index_job_id)
+            assert get_job(index_job_id)["status"] == "canceled"
+            with get_db_connection() as connection:
+                paper = connection.execute(
+                    "SELECT parse_status, index_status FROM papers WHERE paper_id = ?",
+                    (paper_id,),
+                ).fetchone()
+            assert paper["parse_status"] == "succeeded"
+            assert paper["index_status"] == "unknown"
+        finally:
+            object.__setattr__(db_module.settings, "db_path", original_db_path)
+
+
 def insert_test_paper(
     paper_id: str,
     owner_user_id: int,
     team_id: int,
     project_id: int,
     parse_status: str = "succeeded",
+    index_status: str = "queued",
 ) -> None:
     """Insert a minimal paper row for job FK tests."""
     with get_db_connection() as connection:
@@ -366,7 +416,7 @@ def insert_test_paper(
                 parse_status,
                 index_status
             )
-            VALUES (?, ?, 1, ?, ?, ?, ?, 'team', ?, ?, 'queued')
+            VALUES (?, ?, 1, ?, ?, ?, ?, 'team', ?, ?, ?)
             """,
             (
                 paper_id,
@@ -377,6 +427,7 @@ def insert_test_paper(
                 int(project_id),
                 paper_id,
                 parse_status,
+                index_status,
             ),
         )
 

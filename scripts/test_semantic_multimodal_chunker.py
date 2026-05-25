@@ -17,7 +17,7 @@ from src.chunker import chunk_pages
 from src.db import get_paper_chunks, init_db, save_paper_and_chunks
 from src.pdf_parser import elements_from_content_list
 from src.retrieval.bm25_store import BM25Store
-from src.vector_store import VectorStore
+from src.vector_store import VectorStore, safe_chroma_collection_name
 
 
 class FakeEmbeddingClient:
@@ -78,6 +78,7 @@ def main() -> None:
     test_legacy_pages()
     test_embedding_failure()
     test_multimodal_chain_metadata_roundtrip()
+    test_safe_chroma_collection_name_after_truncation()
     print("semantic multimodal chunker tests passed")
 
 
@@ -435,6 +436,16 @@ class FakeCollection:
         assert len(ids) == len(documents) == len(embeddings) == len(metadatas)
         self.documents = documents
         self.metadatas = metadatas
+
+
+def test_safe_chroma_collection_name_after_truncation() -> None:
+    name = safe_chroma_collection_name(
+        "papermate_chunks_zhipu_embedding-3_2048_hybrid-rag-v3-semantic-multimodal-",
+        max_length=63,
+    )
+    assert 3 <= len(name) <= 63
+    assert name[0].isalnum()
+    assert name[-1].isalnum()
 
 
 def table_html(header: list[str], rows: list[list[str]]) -> str:

@@ -125,6 +125,8 @@ def queue_progress_summary(
             SELECT
                 j.*,
                 p.file_name,
+                p.parse_status AS paper_parse_status,
+                p.index_status AS paper_index_status,
                 u.username
             FROM jobs j
             LEFT JOIN papers p ON p.paper_id = j.paper_id
@@ -592,6 +594,33 @@ def cancel_job(user_id: int, job_id: int) -> None:
             """,
             (int(job_id),),
         )
+
+
+def cancel_queued_job(user_id: int, job_id: int) -> bool:
+    """Cancel one queued job and restore paper status for manual scheduling."""
+    job = get_job(job_id)
+    if not job:
+        raise ValueError("没有找到这个任务。")
+    require_team_role(user_id, int(job["team_id"]), "editor")
+    if str(job.get("status") or "") != "queued":
+        return False
+    with get_db_connection() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE jobs
+            SET
+                status = 'canceled',
+                error_message = 'removed from queue by user',
+                finished_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE job_id = ?
+                AND status = 'queued'
+            """,
+            (int(job_id),),
+        )
+        if cursor.rowcount:
+            restore_paper_statuses_after_queue_clear(connection, [job])
+        return bool(cursor.rowcount)
 
 
 def get_job(job_id: int) -> dict[str, Any] | None:

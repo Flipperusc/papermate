@@ -39,6 +39,7 @@ def main() -> None:
     test_workspace_reload_decision()
     test_pdf_viewer_is_lazy_by_default()
     test_queue_lane_states_show_running_and_waiting_content()
+    test_index_state_prefers_fresh_database_status()
     test_upload_pipeline_enqueues_parse_and_waiting_index()
     print("ui nonblocking guard tests passed")
 
@@ -119,6 +120,7 @@ def test_queue_lane_states_show_running_and_waiting_content() -> None:
     running_html = app.render_queue_lane("解析队列", running_job)
     queued_html = app.render_queue_lane("解析队列", queued_job)
     blocked_html = app.render_queue_lane("索引队列", blocked_job)
+    row_html = app.render_queue_rows([blocked_job], 1)
 
     assert "running-paper.pdf" in running_html
     assert "运行中" in running_html
@@ -126,6 +128,31 @@ def test_queue_lane_states_show_running_and_waiting_content() -> None:
     assert "排队中" in queued_html
     assert "waiting-index.pdf" in blocked_html
     assert "等待解析完成" in blocked_html
+    assert "pm-queue-remove" in row_html
+    assert "pm_cancel_queue_job=12" in row_html
+
+
+def test_index_state_prefers_fresh_database_status() -> None:
+    fake_st = FakeStreamlit()
+    fake_st.session_state["index_state_paper-db"] = {"vector": "排队中", "bm25": "排队中"}
+    original_st = app.st
+    original_current_user_id = app.current_user_id
+    original_get_accessible_paper = app.get_accessible_paper
+
+    try:
+        app.st = fake_st
+        app.current_user_id = lambda: 7
+        app.get_accessible_paper = lambda paper_id, user_id: {
+            "paper_id": paper_id,
+            "index_status": "succeeded",
+        }
+        state = app.local_index_state("paper-db")
+    finally:
+        app.st = original_st
+        app.current_user_id = original_current_user_id
+        app.get_accessible_paper = original_get_accessible_paper
+
+    assert state == {"vector": "已构建", "bm25": "已构建"}
 
 
 def test_upload_pipeline_enqueues_parse_and_waiting_index() -> None:
