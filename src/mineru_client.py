@@ -52,6 +52,7 @@ class MinerUClient:
         file_path: str | Path,
         paper_id: str,
         file_name: str | None = None,
+        include_images: bool = False,
     ) -> dict[str, Any]:
         """Upload a local PDF to MinerU and save the returned Markdown."""
         if not self.api_token:
@@ -63,7 +64,7 @@ class MinerUClient:
         batch_id, upload_url = self.request_upload_url(upload_name, paper_id)
         self.upload_file(upload_url, path)
         file_result = self.wait_for_result(batch_id, upload_name, paper_id)
-        outputs = self.download_outputs(file_result, paper_id, path)
+        outputs = self.download_outputs(file_result, paper_id, path, include_images=include_images)
 
         return {
             "paper_id": paper_id,
@@ -211,6 +212,7 @@ class MinerUClient:
         file_result: dict[str, Any],
         paper_id: str,
         pdf_path: Path | None = None,
+        include_images: bool = False,
     ) -> dict[str, Any]:
         """Download Markdown and optional content_list from MinerU result URLs."""
         output_dir = settings.mineru_output_dir / paper_id
@@ -234,7 +236,11 @@ class MinerUClient:
             try:
                 # Prefer the full zip because it carries Markdown, content_list,
                 # and images together; direct md_url is only a text fallback.
-                markdown, content_list, images = self.download_zip_outputs(str(zip_url), output_dir)
+                markdown, content_list, images = self.download_zip_outputs(
+                    str(zip_url),
+                    output_dir,
+                    include_images=include_images,
+                )
             except MinerUError:
                 if not md_url:
                     raise
@@ -256,7 +262,7 @@ class MinerUClient:
         if not markdown.strip():
             raise MinerUError(ErrorCode.MINERU_NO_MARKDOWN)
 
-        if content_list:
+        if include_images and content_list:
             try:
                 markdown, images = self.normalize_visual_outputs(
                     markdown,
@@ -269,7 +275,7 @@ class MinerUClient:
                 logger.exception("MinerU visual normalization failed; falling back to archive images.")
                 if images:
                     markdown = self.replace_markdown_images_with_links(markdown, images)
-        elif images:
+        elif include_images and images:
             # Streamlit cannot safely preview arbitrary local image paths inside
             # Markdown, so the saved images are exposed as data URI links.
             markdown = self.replace_markdown_images_with_links(markdown, images)
@@ -305,6 +311,7 @@ class MinerUClient:
         self,
         url: str,
         output_dir: Path,
+        include_images: bool = False,
     ) -> tuple[str, list[dict[str, Any]] | None, list[dict[str, Any]]]:
         """Download MinerU full zip and extract Markdown plus content_list."""
         try:
@@ -326,7 +333,7 @@ class MinerUClient:
                     raise MinerUError(ErrorCode.MINERU_NO_MARKDOWN)
 
                 markdown = archive.read(md_name).decode("utf-8", errors="replace")
-                images = self.extract_archive_images(archive, output_dir)
+                images = self.extract_archive_images(archive, output_dir) if include_images else []
 
                 content_list = None
                 content_name = self.pick_archive_member(names, "content_list.json", None)

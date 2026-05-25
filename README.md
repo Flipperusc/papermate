@@ -1,15 +1,15 @@
 # PaperMate
 
-PaperMate 是一个本地运行的论文阅读 RAG 助手。当前版本 `0.6.1` 基于 Streamlit，支持 PDF 上传、MinerU 转 Markdown、图片/表格/公式归一化、中文 Markdown 翻译、双语对照阅读、Chroma 向量检索、BM25 关键词检索、Hybrid Retrieval + RRF 问答、可信引用展示、用户反馈、Bad Case 归档，以及按用户管理的文献卡片库。
+PaperMate 是一个本地运行的论文阅读 RAG 助手。当前版本 `0.6.1` 基于 Streamlit，支持 PDF 上传、MinerU 转 Markdown、表格/公式归一化、可选图片解析、中文 Markdown 翻译、双语对照阅读、Chroma 向量检索、BM25 关键词检索、Hybrid Retrieval + RRF 问答、可信引用展示、用户反馈、Bad Case 归档，以及按用户管理的文献卡片库。
 
 ## 核心能力
 
 - 本地账号：启动后先注册/登录本地用户，用户数据保存在 SQLite。
-- PDF 解析：默认调用 MinerU 将 PDF 转为 Markdown，并保存 `full.md`、`content_list.json` 和图片资源。
+- PDF 解析：默认调用 MinerU 将 PDF 转为 Markdown，并保存 `full.md` 和 `content_list.json`；图片资源需在页面中选择“添加图片并重新解析”后才会纳入。
 - 本地解析兜底：可切换到 PyMuPDF，只做文本抽取，不包含 MinerU 的 Markdown 和图片能力。
 - 阅读器：支持原文、中文译文、双语对照三种阅读模式；中文译文可下载，不会覆盖原文。
-- 文本分块：按语义相似度做 sentence-level chunking，并保留页码、章节、图片和表格 metadata，写入 SQLite。
-- 图片理解：图片绑定到相邻文本 chunk 时会调用阿里云百炼 OpenAI 兼容接口，默认模型 `qwen3.6-plus`，描述会进入检索文本和 `images_json`。
+- 文本分块：按语义相似度做 sentence-level chunking，并保留页码、章节和表格 metadata，写入 SQLite。
+- 图片理解：默认不启用；用户选择添加图片并重新解析后，图片绑定到相邻文本 chunk 时会调用阿里云百炼 OpenAI 兼容接口，默认模型 `qwen3.6-plus`，描述会进入检索文本和 `images_json`。
 - Hybrid RAG：用 Chroma 做向量检索，用 BM25 做关键词检索，再通过 RRF、DeepSeek rerank 和邻近证据扩展生成上下文。
 - 查询增强：根据问题类型、实体、章节意图、图表公式编号调整检索查询和向量/BM25 权重。
 - 可信引用：引用来源由系统根据 chunk metadata 生成，页面展示片段、页码、章节和检索细节。
@@ -133,7 +133,7 @@ EMBEDDING_DIMENSIONS=2048
 - DeepSeek 不参与 Embedding。不要把 DeepSeek 配成 Embedding 服务。
 - 切换 Embedding provider、模型或维度后，需要重新构建论文索引。
 - 语义分块会在解析阶段调用 Embedding；如果 Embedding API Key 或网络不可用，解析任务会失败。
-- 含图片的论文会在分块阶段调用 Qwen VLM；请在 `.env` 填写 `DASHSCOPE_API_KEY`，也可以用 `VLM_API_KEY` 覆盖。
+- 图片解析需要用户在页面中显式选择“添加图片并重新解析”，这会在分块阶段调用 Qwen VLM；请在 `.env` 填写 `DASHSCOPE_API_KEY`，也可以用 `VLM_API_KEY` 覆盖。
 
 ## 主要配置
 
@@ -221,20 +221,34 @@ RERANK_BATCH_SIZE=8
 
 1. 注册或登录本地用户。
 2. 首次登录会自动创建默认团队和默认项目；owner/admin 可在“团队管理”添加成员和创建项目。
-3. 进入“论文工作台”，上传一篇 PDF；解析会进入后台任务队列。
-4. 在另一个终端运行 `python scripts/worker.py`，worker 会执行解析、索引、翻译和文献卡片任务。
-5. 进入“论文库”，按项目、上传人、解析状态、索引状态和关键词筛选论文，打开历史论文继续阅读。
-6. 打开已解析论文后，可下载原文 Markdown、图片 ZIP，或创建中文 Markdown 翻译任务。
-7. 点击“构建论文索引”，系统会入队构建 Chroma 向量索引和 BM25 关键词索引。
+3. 进入“论文工作台”，上传一篇 PDF；系统只保存到论文库，不会自动创建解析或索引任务。
+4. 在另一个终端运行 `python scripts/worker.py`，worker 会并发维护解析、索引和其他任务队列。
+5. 进入“论文库”，按项目、上传人、解析状态、索引状态和关键词筛选论文，选择当前要先解析或构建索引的论文。
+6. 打开已解析论文后，可下载原文 Markdown，或创建中文 Markdown 翻译任务；如需图片参与检索，在工作台选择“添加图片并重新解析”。
+7. 解析完成后点击“构建论文索引”，系统会入队构建 Chroma 向量索引和 BM25 关键词索引。
 8. 在 Ask PaperMate 区域提问，回答会展示可信引用、原文片段和 Hybrid 检索细节。
 9. 在回答下方提交反馈；负面反馈自动进入 Bad Case。
 10. 创建文献卡片任务，worker 完成后会保存到所选卡片库；“文献卡片库”按团队范围展示卡片。
 11. 在“反馈记录”页输入管理员密码，查看当前团队的反馈总览、Bad Case 和原始记录。
 
-后台 worker：
+后台 worker，默认启动 parse / index / other 三条 lane，其中索引 lane 会跳过仍在解析中的论文，优先处理下一篇已经解析完成的论文：
 
 ```bash
 python scripts/worker.py
+```
+
+只运行某一类任务 lane：
+
+```bash
+python scripts/worker.py --types parse
+python scripts/worker.py --types index
+python scripts/worker.py --types translate,card,eval
+```
+
+使用旧的单队列串行模式：
+
+```bash
+python scripts/worker.py --serial
 ```
 
 只处理一个任务后退出，便于本地调试：

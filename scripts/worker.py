@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -17,13 +18,27 @@ from config import settings
 from src.card_pipeline import generate_literature_card
 from src.chunker import chunk_pages
 from src.db import get_db_connection, init_db, save_paper_and_chunks
-from src.job_service import claim_next_job, complete_job, enqueue_job, fail_job, latest_job_for_paper
+from src.job_service import (
+    claim_next_job,
+    complete_job,
+    enqueue_job,
+    fail_job,
+    latest_job_for_paper,
+    requeue_running_jobs,
+)
 from src.literature_card_service import save_literature_card
 from src.markdown_translator import translate_markdown_to_chinese
 from src.paper_service import update_paper_status
 from src.pdf_parser import parse_pdf
 from src.retrieval.bm25_store import BM25Store
 from src.vector_store import VectorStore
+
+
+DEFAULT_WORKER_LANES: tuple[tuple[str, ...], ...] = (
+    ("parse",),
+    ("index",),
+    ("translate", "card", "eval"),
+)
 
 
 def run_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -44,7 +59,8 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
 
 def run_parse_job(job: dict[str, Any]) -> dict[str, Any]:
     """Parse a saved PDF and persist chunks."""
-    paper_id = str(job.get("paper_id") or job.get("payload", {}).get("paper_id") or "")
+    payload = job.get("payload") or {}
+    paper_id = str(job.get("paper_id") or payload.get("paper_id") or "")
     if not paper_id:
         raise ValueError("parse job missing paper_id")
 
@@ -53,15 +69,18 @@ def run_parse_job(job: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"paper not found: {paper_id}")
     update_paper_status(paper_id, parse_status="running")
 
-    parsed_pdf = parse_pdf(paper["save_path"], paper_id)
+    include_images = payload_bool(payload, "include_images", default=False)
+    parsed_pdf = parse_pdf(paper["save_path"], paper_id, include_images=include_images)
     chunks = chunk_pages(
         paper_id,
         parsed_pdf["pages"],
         chunk_size=settings.rag_chunk_size,
         overlap=settings.rag_chunk_overlap,
         elements=parsed_pdf.get("elements"),
+        include_images=include_images,
     )
     total_chars = len("\n\n".join(page["text"] for page in parsed_pdf["pages"]))
+    images = parsed_pdf.get("images", []) if include_images else []
     save_paper_and_chunks(
         {
             "paper_id": paper_id,
@@ -80,7 +99,7 @@ def run_parse_job(job: dict[str, Any]) -> dict[str, Any]:
             "markdown_path": parsed_pdf.get("markdown_path"),
             "translated_markdown_path": parsed_pdf.get("translated_markdown_path"),
             "content_list_path": parsed_pdf.get("content_list_path"),
-            "images": parsed_pdf.get("images", []),
+            "images": images,
             "page_count": parsed_pdf["page_count"],
             "total_chars": total_chars,
         },
@@ -91,10 +110,14 @@ def run_parse_job(job: dict[str, Any]) -> dict[str, Any]:
         "chunk_count": len(chunks),
         "page_count": parsed_pdf["page_count"],
         "markdown_path": parsed_pdf.get("markdown_path"),
+        "include_images": include_images,
+        "image_count": len(images),
     }
-    if bool(job.get("payload", {}).get("auto_index")):
+    if payload_bool(payload, "auto_index", default=False):
+        force_reindex = payload_bool(payload, "force_reindex", default=False)
         existing_index_job = latest_job_for_paper(int(job["team_id"]), paper_id, "index")
-        if existing_index_job and existing_index_job.get("status") in {"queued", "running", "succeeded"}:
+        reusable_statuses = {"queued", "running"} if force_reindex else {"queued", "running", "succeeded"}
+        if existing_index_job and existing_index_job.get("status") in reusable_statuses:
             result["index_job_id"] = existing_index_job.get("job_id")
             result["index_status"] = existing_index_job.get("status")
         else:
@@ -112,6 +135,18 @@ def run_parse_job(job: dict[str, Any]) -> dict[str, Any]:
             )
             result["index_status"] = "queued"
     return result
+
+
+def payload_bool(payload: dict[str, Any], key: str, default: bool = False) -> bool:
+    """Read a boolean value from a job payload."""
+    value = payload.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return default
 
 
 def run_index_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -201,6 +236,26 @@ def run_card_job(job: dict[str, Any]) -> dict[str, Any]:
     return {"paper_id": paper_id, "card_id": card_id}
 
 
+def fail_pending_index_jobs(paper_id: str, error_message: str) -> None:
+    """Fail queued index jobs that can no longer run because parsing failed."""
+    init_db()
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET
+                status = 'failed',
+                error_message = ?,
+                finished_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE paper_id = ?
+                AND job_type = 'index'
+                AND status = 'queued'
+            """,
+            (str(error_message or "")[:4000], paper_id),
+        )
+
+
 def load_paper(paper_id: str) -> dict[str, Any] | None:
     """Load one paper by id without permission filtering for worker use."""
     init_db()
@@ -242,12 +297,63 @@ def translated_output_path(markdown_path: str) -> str:
     return str(source.with_name(f"{source.name}.zh.md"))
 
 
-def run_worker(once: bool = False, poll_interval: float = 3.0, limit: int | None = None) -> int:
+def parse_job_types(raw_types: str | None) -> tuple[str, ...] | None:
+    """Parse a comma-separated job type lane filter."""
+    if not raw_types:
+        return None
+    job_types = tuple(job_type.strip().lower() for job_type in raw_types.split(",") if job_type.strip())
+    return job_types or None
+
+
+def worker_lane_label(job_types: tuple[str, ...]) -> str:
+    """Return a readable label for a worker lane."""
+    return ",".join(job_types)
+
+
+def run_worker_lane(job_types: tuple[str, ...], poll_interval: float) -> None:
+    """Run one named worker lane forever."""
+    label = worker_lane_label(job_types)
+    print(f"Worker lane started: {label}", flush=True)
+    run_worker(poll_interval=poll_interval, job_types=job_types)
+
+
+def run_worker_lanes(poll_interval: float = 3.0, recover_running: bool = False) -> int:
+    """Run default parse/index/other lanes concurrently."""
+    if recover_running:
+        report_recovered_jobs(requeue_running_jobs())
+    threads: list[threading.Thread] = []
+    for job_types in DEFAULT_WORKER_LANES:
+        thread = threading.Thread(
+            target=run_worker_lane,
+            args=(job_types, poll_interval),
+            name=f"papermate-worker-{worker_lane_label(job_types)}",
+            daemon=True,
+        )
+        thread.start()
+        threads.append(thread)
+
+    while True:
+        for thread in threads:
+            thread.join(timeout=1.0)
+        dead_threads = [thread.name for thread in threads if not thread.is_alive()]
+        if dead_threads:
+            raise RuntimeError(f"worker lane stopped unexpectedly: {', '.join(dead_threads)}")
+
+
+def run_worker(
+    once: bool = False,
+    poll_interval: float = 3.0,
+    limit: int | None = None,
+    job_types: tuple[str, ...] | None = None,
+    recover_running: bool = False,
+) -> int:
     """Run jobs until stopped, or once when requested."""
     init_db()
+    if recover_running:
+        report_recovered_jobs(requeue_running_jobs(job_types=job_types))
     completed = 0
     while True:
-        job = claim_next_job()
+        job = claim_next_job(job_types=job_types)
         if not job:
             if once:
                 return completed
@@ -258,7 +364,8 @@ def run_worker(once: bool = False, poll_interval: float = 3.0, limit: int | None
             result = run_job(job)
         except Exception as exc:
             if job.get("paper_id") and job.get("job_type") == "parse":
-                update_paper_status(str(job["paper_id"]), parse_status="failed")
+                update_paper_status(str(job["paper_id"]), parse_status="failed", index_status="failed")
+                fail_pending_index_jobs(str(job["paper_id"]), f"parse failed before indexing: {exc}")
             elif job.get("paper_id") and job.get("job_type") == "index":
                 update_paper_status(str(job["paper_id"]), index_status="failed")
             elif job.get("paper_id") and job.get("job_type") == "translate":
@@ -279,14 +386,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="process at most one queued job and exit")
     parser.add_argument("--limit", type=int, default=None, help="process at most N jobs and exit")
     parser.add_argument("--poll-interval", type=float, default=3.0, help="seconds between polls")
+    parser.add_argument(
+        "--serial",
+        action="store_true",
+        help="run the legacy single queue loop instead of default parse/index/other lanes",
+    )
+    parser.add_argument(
+        "--types",
+        default=None,
+        help="comma-separated job types this worker may claim, for example parse or index",
+    )
+    parser.add_argument(
+        "--recover-running",
+        action="store_true",
+        help="requeue jobs left running by an interrupted worker before processing",
+    )
     return parser.parse_args()
+
+
+def report_recovered_jobs(jobs: list[dict[str, Any]]) -> None:
+    """Print a concise startup recovery summary."""
+    if not jobs:
+        print("Recovered 0 interrupted running jobs.", flush=True)
+        return
+    job_labels = ", ".join(f"#{job['job_id']} {job['job_type']}" for job in jobs[:10])
+    suffix = "" if len(jobs) <= 10 else f", +{len(jobs) - 10} more"
+    print(f"Recovered {len(jobs)} interrupted running job(s): {job_labels}{suffix}", flush=True)
 
 
 def main() -> int:
     """Worker entry point."""
     args = parse_args()
+    job_types = parse_job_types(args.types)
     try:
-        run_worker(once=args.once, poll_interval=args.poll_interval, limit=args.limit)
+        if job_types or args.once or args.limit is not None or args.serial:
+            run_worker(
+                once=args.once,
+                poll_interval=args.poll_interval,
+                limit=args.limit,
+                job_types=job_types,
+                recover_running=args.recover_running,
+            )
+        else:
+            run_worker_lanes(poll_interval=args.poll_interval, recover_running=args.recover_running)
     except KeyboardInterrupt:
         print("Worker stopped by user.", flush=True)
     return 0

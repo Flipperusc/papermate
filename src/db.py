@@ -11,6 +11,10 @@ from config import settings
 from src.chunk_metadata import hydrate_chunk_metadata, metadata_json
 
 
+DB_BUSY_TIMEOUT_MS = 2000
+_INITIALIZED_DB_PATHS: set[Path] = set()
+
+
 class ClosingConnection(sqlite3.Connection):
     """SQLite connection that closes when used as a context manager."""
 
@@ -36,15 +40,35 @@ def get_db_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = Path(db_path) if db_path is not None else settings.db_path
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(path, factory=ClosingConnection)
+    connection = sqlite3.connect(path, factory=ClosingConnection, timeout=DB_BUSY_TIMEOUT_MS / 1000)
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
+    configure_connection(connection)
     return connection
 
 
-def init_db(db_path: str | Path | None = None) -> None:
+def configure_connection(connection: sqlite3.Connection, enable_wal: bool = False) -> None:
+    """Apply low-contention SQLite settings for UI and worker connections."""
+    connection.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
+    if enable_wal:
+        connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA synchronous = NORMAL")
+    connection.execute("PRAGMA foreign_keys = ON")
+
+
+def db_init_key(db_path: str | Path | None = None) -> Path:
+    """Return the normalized key used to track per-process DB initialization."""
+    path = Path(db_path) if db_path is not None else settings.db_path
+    return path.resolve()
+
+
+def init_db(db_path: str | Path | None = None, force: bool = False) -> None:
     """Create PaperMate database tables if they do not already exist."""
+    key = db_init_key(db_path)
+    if not force and key in _INITIALIZED_DB_PATHS:
+        return
+
     with get_db_connection(db_path) as connection:
+        configure_connection(connection, enable_wal=True)
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -261,6 +285,7 @@ def init_db(db_path: str | Path | None = None) -> None:
             """
         )
         ensure_schema_migrations(connection)
+    _INITIALIZED_DB_PATHS.add(key)
 
 
 def ensure_schema_migrations(connection: sqlite3.Connection) -> None:

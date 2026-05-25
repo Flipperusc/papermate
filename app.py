@@ -37,7 +37,15 @@ from src.errors import (
     VectorStoreError,
 )
 from src.feedback_service import FEEDBACK_OPTIONS, list_bad_cases, list_feedback_records, save_feedback
-from src.job_service import cancel_job, enqueue_job, latest_job_for_paper, list_jobs, retry_job
+from src.job_service import (
+    cancel_job,
+    clear_team_queued_jobs,
+    enqueue_job,
+    latest_job_for_paper,
+    list_jobs,
+    queue_progress_summary,
+    retry_job,
+)
 from src.literature_card_service import (
     CARD_FIELD_LABELS,
     claim_unassigned_literature_cards,
@@ -89,6 +97,8 @@ from src.vector_store import VectorStore
 
 logger = get_logger(__name__)
 BILINGUAL_ALIGNMENT_CACHE_VERSION = "header-image-notices-v2"
+QUEUE_REFRESH_SECONDS = 5
+QUEUE_HOVER_LIMIT = 10
 
 CARD_PALETTES = [
     {"top": "#eaf3ff", "accent": "#2563eb", "field": "#f6faff"},
@@ -504,6 +514,15 @@ def prepare_user_workspace(user_id: int) -> None:
     team_id = int(workspace["team_id"])
     ensure_default_card_library(user_id, team_id=team_id)
     claim_unassigned_literature_cards(user_id, team_id=team_id)
+    st.session_state[f"workspace_prepared_{int(user_id)}"] = True
+
+
+def prepare_user_workspace_once(user_id: int) -> None:
+    """Prepare a user's writable workspace at most once per Streamlit session."""
+    state_key = f"workspace_prepared_{int(user_id)}"
+    if st.session_state.get(state_key):
+        return
+    prepare_user_workspace(user_id)
 
 
 def current_team_context() -> dict[str, Any]:
@@ -556,39 +575,6 @@ def clear_authenticated_session() -> None:
     for key in list(st.session_state.keys()):
         if key not in keep_keys:
             del st.session_state[key]
-
-
-def render_welcome_dialog() -> None:
-    """Show the first-visit PaperMate intro dialog."""
-    if st.session_state.get("welcome_seen"):
-        return
-
-    @st.dialog("欢迎来到 PaperMate")
-    def welcome() -> None:
-        st.markdown(
-            """
-            <div class="pm-welcome">
-              <div class="pm-welcome-kicker">你的论文搭子</div>
-              <h2>把 PDF 丢进来，剩下交给 PaperMate 。</h2>
-              <p>我会帮你把论文转成 Markdown，抽出可检索的片段，严格根据论文本身回答问题，还能把重点整理成文献卡片。</p>
-              <ul>
-                <li>上传 PDF，解析正文和图片。</li>
-                <li>构建 Hybrid RAG 索引，问问题不靠玄学。</li>
-                <li>把卡片存进你自己的卡片库，按主题分门别类。</li>
-              </ul>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        if st.button("开始整理我的论文", type="primary", use_container_width=True):
-            st.session_state["welcome_seen"] = True
-            st.rerun()
-
-    welcome()
-
-
-
-
 
 
 def render_sidebar_navigation(user: dict[str, Any]) -> str:
@@ -1305,7 +1291,7 @@ def process_uploaded_pdf(
     return result
 
 
-def local_index_state(paper_id: str) -> dict[str, str]:
+def local_index_state(paper_id: str, allow_db: bool = True) -> dict[str, str]:
     """Return UI-only index status without triggering remote embedding calls."""
     state_key = f"index_state_{paper_id}"
     state = st.session_state.get(state_key, {})
@@ -1313,6 +1299,24 @@ def local_index_state(paper_id: str) -> dict[str, str]:
     bm25_status = str(state.get("bm25") or "未知")
 
     if vector_status == "未知" or bm25_status == "未知":
+        session_paper = st.session_state.get("processed_pdf") or {}
+        session_paper_id = str((session_paper.get("saved_file") or {}).get("paper_id") or "")
+        index_status = str(session_paper.get("index_status") or "")
+        if paper_id and session_paper_id == str(paper_id) and index_status:
+            if index_status == "succeeded":
+                vector_status = "已构建"
+                bm25_status = "已构建"
+            elif index_status == "queued":
+                vector_status = vector_status if vector_status != "未知" else "排队中"
+                bm25_status = bm25_status if bm25_status != "未知" else "排队中"
+            elif index_status == "running":
+                vector_status = vector_status if vector_status != "未知" else "构建中"
+                bm25_status = bm25_status if bm25_status != "未知" else "构建中"
+            elif index_status == "failed":
+                vector_status = vector_status if vector_status != "未知" else "失败"
+                bm25_status = bm25_status if bm25_status != "未知" else "失败"
+
+    if allow_db and (vector_status == "未知" or bm25_status == "未知"):
         try:
             paper = get_accessible_paper(paper_id, current_user_id())
         except Exception:
@@ -1356,8 +1360,8 @@ def render_header() -> None:
     """Render the shared page header."""
     render_app_header(
         "PaperMate",
-        "论文阅读 RAG 助手：PDF 转 Markdown、检索问答、反馈记录和文献卡片管理。",
-        [render_status_badge("本地工作台", "primary"), render_status_badge("可信引用", "info")],
+        "论文阅读 RAG 助手",
+        [render_status_badge("可信引用", "info")],
     )
 
 
@@ -1657,7 +1661,20 @@ def card_palette(card: dict[str, Any]) -> dict[str, str]:
 
 
 
-def render_pdf_viewer(save_path: str | None) -> None:
+@st.cache_data(show_spinner=False, max_entries=8)
+def cached_pdf_bytes(save_path: str, mtime_ns: int, size_bytes: int) -> bytes:
+    """Read PDF bytes keyed by path, mtime, and size for explicit previews."""
+    del mtime_ns, size_bytes
+    return Path(save_path).read_bytes()
+
+
+def pdf_viewer_state_key(pdf_path: Path, mtime_ns: int, size_bytes: int) -> str:
+    """Return a stable session-state key for one PDF preview version."""
+    digest = hashlib.sha1(f"{pdf_path.resolve()}|{mtime_ns}|{size_bytes}".encode("utf-8")).hexdigest()[:16]
+    return f"pdf_preview_loaded_{digest}"
+
+
+def render_pdf_viewer(save_path: str | None, eager: bool = False) -> None:
     """Render a PDF viewer for a locally saved paper."""
     if not save_path:
         st.warning("没有找到该论文的 PDF 保存路径。")
@@ -1668,7 +1685,20 @@ def render_pdf_viewer(save_path: str | None) -> None:
         st.warning(f"PDF 文件不存在：{pdf_path}")
         return
 
-    pdf_bytes = pdf_path.read_bytes()
+    stat = pdf_path.stat()
+    state_key = pdf_viewer_state_key(pdf_path, int(stat.st_mtime_ns), int(stat.st_size))
+    if eager:
+        st.session_state[state_key] = True
+
+    st.caption(f"PDF：{pdf_path.name} · {format_file_size(int(stat.st_size))}")
+    if not st.session_state.get(state_key):
+        if st.button("加载 PDF 预览 / 下载", use_container_width=True, key=f"{state_key}_button"):
+            st.session_state[state_key] = True
+            st.rerun()
+        st.info("为保持页面切换流畅，PDF 文件会在点击后再读取和嵌入。")
+        return
+
+    pdf_bytes = cached_pdf_bytes(str(pdf_path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
     st.download_button(
         "下载完整 PDF",
         data=pdf_bytes,
@@ -1867,6 +1897,349 @@ def render_status_badge(text: str, type: str = "default") -> str:
     return f'<span class="pm-badge pm-badge-{safe_type}">{html.escape(str(text))}</span>'
 
 
+def enqueue_index_build_for_paper(
+    paper_id: str,
+    *,
+    require_parsed: bool = True,
+    payload_extra: dict[str, Any] | None = None,
+) -> tuple[int, bool]:
+    """Queue an index build for one paper and return (job_id, reused_existing)."""
+    paper = get_accessible_paper(paper_id, current_user_id(), minimum_role="editor")
+    if not paper:
+        raise PermissionError("没有找到当前论文或无权构建索引。")
+    parse_status = str(paper.get("parse_status") or "")
+    if require_parsed and parse_status != "succeeded":
+        raise ValueError("这篇论文还没有解析完成，暂时不能构建索引。")
+
+    latest_job = latest_job_for_paper(int(paper["team_id"]), paper_id, "index")
+    if latest_job and latest_job.get("status") in {"queued", "running"}:
+        update_paper_status(paper_id, index_status=str(latest_job["status"]))
+        state_label = "构建中" if latest_job.get("status") == "running" else "排队中"
+        st.session_state[f"index_state_{paper_id}"] = {"vector": state_label, "bm25": state_label}
+        return int(latest_job["job_id"]), True
+
+    payload = {"paper_id": paper_id}
+    payload.update(payload_extra or {})
+    job_id = enqueue_job(
+        "index",
+        user_id=current_user_id(),
+        team_id=int(paper["team_id"]),
+        project_id=paper.get("project_id"),
+        paper_id=paper_id,
+        payload=payload,
+    )
+    update_paper_status(paper_id, index_status="queued")
+    st.session_state[f"index_state_{paper_id}"] = {"vector": "排队中", "bm25": "排队中"}
+    return job_id, False
+
+
+def enqueue_upload_processing_pipeline(
+    paper: dict[str, Any],
+    *,
+    include_images: bool = False,
+) -> dict[str, Any]:
+    """Queue parse and index jobs for an uploaded paper, reusing active jobs."""
+    paper_id = str(paper.get("paper_id") or "")
+    team_id = int(paper.get("team_id") or 0)
+    if not paper_id or team_id <= 0:
+        raise ValueError("paper metadata is missing paper_id or team_id")
+
+    active_statuses = {"queued", "running"}
+    parse_status = str(paper.get("parse_status") or "").strip().lower()
+    index_status = str(paper.get("index_status") or "").strip().lower()
+
+    latest_parse_job = latest_job_for_paper(team_id, paper_id, "parse")
+    latest_parse_status = str((latest_parse_job or {}).get("status") or "").strip().lower()
+    parse_job_id: int | None = None
+    parse_reused = False
+
+    parse_needed = parse_status != "succeeded" or latest_parse_status in active_statuses
+    if latest_parse_status in active_statuses:
+        parse_job_id = int(latest_parse_job["job_id"])
+        parse_reused = True
+        update_paper_status(paper_id, parse_status=latest_parse_status)
+    elif parse_needed:
+        update_paper_status(paper_id, parse_status="queued", index_status="queued")
+        parse_job_id = enqueue_job(
+            "parse",
+            user_id=current_user_id(),
+            team_id=team_id,
+            project_id=paper.get("project_id"),
+            paper_id=paper_id,
+            payload={
+                "paper_id": paper_id,
+                "save_path": paper.get("save_path"),
+                "auto_created_from_upload": True,
+                "auto_index": False,
+                "include_images": bool(include_images),
+            },
+        )
+
+    latest_index_job = latest_job_for_paper(team_id, paper_id, "index")
+    latest_index_status = str((latest_index_job or {}).get("status") or "").strip().lower()
+    index_job_id: int | None = None
+    index_reused = False
+    should_queue_index = parse_needed or index_status != "succeeded"
+
+    if latest_index_status in active_statuses:
+        index_job_id = int(latest_index_job["job_id"])
+        index_reused = True
+        update_paper_status(paper_id, index_status=latest_index_status)
+    elif should_queue_index:
+        index_job_id = enqueue_job(
+            "index",
+            user_id=current_user_id(),
+            team_id=team_id,
+            project_id=paper.get("project_id"),
+            paper_id=paper_id,
+            payload={
+                "paper_id": paper_id,
+                "auto_created_from_upload": True,
+                "waiting_for_parse": parse_status != "succeeded" or parse_job_id is not None,
+            },
+        )
+        update_paper_status(paper_id, index_status="queued")
+        st.session_state[f"index_state_{paper_id}"] = {"vector": "排队中", "bm25": "排队中"}
+
+    return {
+        "parse_job_id": parse_job_id,
+        "index_job_id": index_job_id,
+        "parse_reused": parse_reused,
+        "index_reused": index_reused,
+    }
+
+
+def upload_processing_message(reused: bool, pipeline: dict[str, Any]) -> str:
+    """Return the upload result message for the automatic processing pipeline."""
+    prefix = "团队中已存在相同 PDF，已打开已有论文" if reused else "已保存到论文库"
+    parse_job_id = pipeline.get("parse_job_id")
+    index_job_id = pipeline.get("index_job_id")
+    if parse_job_id and index_job_id:
+        return f"{prefix}，已自动加入解析队列 #{parse_job_id} 和索引队列 #{index_job_id}。索引会等解析成功后再执行。"
+    if parse_job_id:
+        return f"{prefix}，已自动加入解析队列 #{parse_job_id}。"
+    if index_job_id:
+        return f"{prefix}，已自动加入索引队列 #{index_job_id}。"
+    return f"{prefix}，解析和索引已可用。"
+
+
+def queue_job_type_label(job_type: str) -> str:
+    """Return a compact Chinese label for queue job types."""
+    return {
+        "parse": "解析",
+        "index": "索引",
+    }.get(str(job_type or "").strip().lower(), str(job_type or "任务"))
+
+
+def queue_job_paper_label(job: dict[str, Any] | None) -> str:
+    """Return a safe short paper label for queue displays."""
+    if not job:
+        return "空闲"
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    save_path = str(payload.get("save_path") or "").strip()
+    label = str(
+        job.get("file_name")
+        or payload.get("file_name")
+        or (Path(save_path).name if save_path else "")
+        or job.get("paper_id")
+        or "未关联论文"
+    ).strip()
+    return label or "未关联论文"
+
+
+def queue_job_display_state(job: dict[str, Any] | None) -> tuple[str, str]:
+    """Return CSS modifier and readable state for one queue item."""
+    if not job:
+        return "idle", "空闲"
+    status = str(job.get("status") or "").strip().lower()
+    job_type = str(job.get("job_type") or "").strip().lower()
+    if status == "running":
+        return "active", f"运行中 · #{job.get('job_id')}"
+    if (
+        job_type == "index"
+        and bool(job.get("paper_id"))
+        and (job.get("queue_block_reason") or str(job.get("paper_parse_status") or "") != "succeeded")
+    ):
+        return "blocked", f"等待解析完成 · #{job.get('job_id')}"
+    if status == "queued":
+        return "queued", f"排队中 · #{job.get('job_id')}"
+    return "idle", status or "空闲"
+
+
+def render_queue_lane(label: str, job: dict[str, Any] | None) -> str:
+    """Render one queue lane with running or waiting paper content."""
+    paper_label = queue_job_paper_label(job)
+    modifier, state = queue_job_display_state(job)
+    return (
+        f'<div class="pm-queue-lane pm-queue-lane-{modifier}">'
+        f'<div class="pm-queue-lane-label">{html.escape(label)}</div>'
+        f'<div class="pm-queue-lane-paper">{html.escape(paper_label)}</div>'
+        f'<div class="pm-queue-lane-state">{html.escape(state)}</div>'
+        "</div>"
+    )
+
+
+def queue_row_state_label(job: dict[str, Any]) -> str:
+    """Return a short state for queue hover rows."""
+    modifier, state = queue_job_display_state(job)
+    if modifier == "blocked":
+        return "等解析"
+    if modifier == "queued":
+        return "排队中"
+    if modifier == "active":
+        return "运行中"
+    return state
+
+
+def render_queue_rows(queued_jobs: list[dict[str, Any]], queued_count: int) -> str:
+    """Render up to QUEUE_HOVER_LIMIT queued papers for the hover panel."""
+    if not queued_jobs:
+        return '<div class="pm-queue-empty">当前没有等待中的解析或索引任务。</div>'
+    rows = []
+    for position, job in enumerate(queued_jobs[:QUEUE_HOVER_LIMIT], start=1):
+        job_type = queue_job_type_label(str(job.get("job_type") or ""))
+        paper_label = queue_job_paper_label(job)
+        job_id = job.get("job_id")
+        state_label = queue_row_state_label(job)
+        rows.append(
+            (
+                '<div class="pm-queue-row">'
+                f'<div class="pm-queue-type">{html.escape(job_type)}</div>'
+                f'<div class="pm-queue-paper" title="{html.escape(paper_label)}">{html.escape(paper_label)}</div>'
+                f'<div class="pm-queue-meta">#{html.escape(str(job_id))} · {html.escape(state_label)}</div>'
+                "</div>"
+            )
+        )
+    more_count = max(0, int(queued_count) - len(queued_jobs[:QUEUE_HOVER_LIMIT]))
+    if more_count:
+        rows.append(f'<div class="pm-queue-more">还有 {more_count} 条排队任务未显示</div>')
+    return "\n".join(rows)
+
+
+@st.fragment(run_every=QUEUE_REFRESH_SECONDS)
+def render_global_queue_progress(user_id: int, team_id: int) -> None:
+    """Render the auto-refreshing global parse/index queue bar."""
+    state_key = f"queue_progress_summary_{int(team_id)}"
+    try:
+        summary = queue_progress_summary(
+            int(user_id),
+            int(team_id),
+            job_types=("parse", "index"),
+            queued_limit=QUEUE_HOVER_LIMIT,
+        )
+        st.session_state[state_key] = summary
+    except Exception as exc:  # pragma: no cover - defensive UI guard
+        logger.warning("Queue progress summary failed. team_id=%s error=%s", team_id, exc)
+        summary = st.session_state.get(state_key)
+        if not isinstance(summary, dict):
+            return
+
+    running_by_type = summary.get("running_by_type") or {}
+    queued_by_type = summary.get("queued_by_type") or {}
+    blocked_by_type = summary.get("blocked_by_type") or {}
+    parse_job = running_by_type.get("parse") or queued_by_type.get("parse")
+    index_job = running_by_type.get("index") or queued_by_type.get("index") or blocked_by_type.get("index")
+    running_count = int(summary.get("running_count") or 0)
+    queued_count = int(summary.get("queued_count") or 0)
+    queued_jobs = list(summary.get("queued") or [])
+    active_total = running_count + queued_count
+    has_active_work = active_total > 0
+    fill_height = 100 if running_count else (46 if queued_count else 0)
+    fill_class = "pm-queue-fill" if has_active_work else "pm-queue-fill pm-queue-fill-idle"
+    queue_class = "pm-queue-bar pm-queue-active" if has_active_work else "pm-queue-bar pm-queue-idle"
+    title = (
+        f"后台队列：{running_count} 个处理中 · {queued_count} 个排队"
+        if running_count
+        else f"后台队列：{queued_count} 个等待中"
+        if queued_count
+        else "后台队列空闲"
+    )
+    subtitle = "每 5 秒自动刷新 · 悬停查看排队论文" if has_active_work else "没有正在处理的解析或索引任务"
+    queued_title = f"排队论文（最多显示 {QUEUE_HOVER_LIMIT} 条，共 {queued_count} 条）"
+    lanes_html = (
+        "\n".join(
+            [
+                '<div class="pm-queue-current">',
+                render_queue_lane("解析队列", parse_job),
+                render_queue_lane("索引队列", index_job),
+                "</div>",
+            ]
+        )
+        if has_active_work
+        else ""
+    )
+    idle_html = '<div class="pm-queue-idle-card">当前没有正在处理的解析或索引任务。</div>' if not has_active_work else ""
+    popover_html = (
+        "\n".join(
+            [
+                '<div class="pm-queue-popover">',
+                f'<div class="pm-queue-popover-title">{html.escape(queued_title)}</div>',
+                render_queue_rows(queued_jobs, queued_count),
+                "</div>",
+            ]
+        )
+        if has_active_work
+        else ""
+    )
+
+    queue_html = "\n".join(
+        [
+            f'<div class="{queue_class}" role="status" aria-live="polite">',
+            '<div class="pm-queue-header">',
+            "<div>",
+            f'<div class="pm-queue-title">{html.escape(title)}</div>',
+            f'<div class="pm-queue-subtitle">{html.escape(subtitle)}</div>',
+            "</div>",
+            "</div>",
+            '<div class="pm-queue-body">',
+            '<div class="pm-queue-track" aria-hidden="true">',
+            f'<div class="{fill_class}" style="height:{fill_height}%"></div>',
+            "</div>",
+            lanes_html,
+            idle_html,
+            "</div>",
+            popover_html,
+            "</div>",
+        ]
+    )
+    st.markdown(
+        queue_html,
+        unsafe_allow_html=True,
+    )
+
+
+def clear_queue_for_ui_session_once(user_id: int, team_context: dict[str, Any]) -> None:
+    """Clear queued jobs once when a new UI session starts for the selected team."""
+    team_id = int(team_context.get("team_id") or 0)
+    if not team_id or not can_write(str(team_context.get("role") or "")):
+        return
+
+    state_key = f"pm_queue_cleared_for_session_{team_id}"
+    if st.session_state.get(state_key):
+        return
+    st.session_state[state_key] = True
+    try:
+        result = clear_team_queued_jobs(
+            int(user_id),
+            team_id,
+            reason="queue cleared by UI refresh",
+        )
+    except Exception:
+        logger.exception("Failed to clear queued jobs for UI session. team_id=%s", team_id)
+        return
+
+    cleared_count = int(result.get("cleared_count") or 0)
+    if cleared_count:
+        st.session_state["pm_queue_clear_notice"] = f"已清空 {cleared_count} 个未开始的后台任务，请手动选择当前要处理的论文。"
+
+
+def render_queue_clear_notice() -> None:
+    """Show a short notice after startup queue cleanup."""
+    notice = st.session_state.pop("pm_queue_clear_notice", None)
+    if notice:
+        st.toast(str(notice))
+
+
 
 
 def render_app_shell() -> None:
@@ -1921,18 +2294,6 @@ def render_error_card(title: str, message: str, detail: str | None = None) -> No
             st.code(str(detail), language="text")
 
 
-def render_privacy_note() -> None:
-    """Render the local-first privacy note."""
-    st.markdown(
-        """
-        <div class="pm-privacy-note">
-          默认本地运行：论文文件、向量索引、BM25 索引和文献卡片保存在你的本地环境中。
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def render_auth_hero() -> None:
     """Render the branded product hero for the auth page."""
     st.markdown(
@@ -1942,19 +2303,17 @@ def render_auth_hero() -> None:
             <span class="pm-brand-dot">PM</span>
             <span>PaperMate · AI Research Workspace</span>
           </div>
-          <div class="pm-hero-title">把论文阅读、可信问答和文献卡片整理在一个本地工作台里</div>
+          <div class="pm-hero-title">把论文阅读、可信问答和文献卡片整理在一个工作台里</div>
           <div class="pm-hero-subtitle">
-            上传 PDF，PaperMate 会解析正文与图片，构建混合检索索引，并基于原文引用回答问题，帮助你沉淀可复用的文献卡片。
+            上传 PDF，选择解析和索引，并基于原文引用回答问题。
           </div>
-          <div class="pm-auth-slogan">Upload. Read. Ask. Organize.</div>
           <div class="pm-badges">
-            {render_status_badge("本地运行", "success")}
             {render_status_badge("数据私有", "primary")}
             {render_status_badge("可信引用", "info")}
             {render_status_badge("Markdown 导出", "default")}
           </div>
           <div class="pm-feature-grid">
-            <div class="pm-feature-card"><strong>PDF 智能解析</strong><span>自动提取正文、章节、图片与 Markdown。</span></div>
+            <div class="pm-feature-card"><strong>PDF 智能解析</strong><span>自动提取正文、章节、表格与 Markdown。</span></div>
             <div class="pm-feature-card"><strong>可信引用问答</strong><span>回答基于论文原文片段和检索证据。</span></div>
             <div class="pm-feature-card"><strong>文献卡片沉淀</strong><span>将研究问题、方法、贡献和局限保存进卡片库。</span></div>
           </div>
@@ -2042,7 +2401,6 @@ def render_auth_card() -> None:
                     st.toast("账户已创建。")
                     st.rerun()
 
-    render_privacy_note()
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -2054,16 +2412,16 @@ def render_sidebar(user: dict[str, Any]) -> str:
     role = team_context["role"]
     processed_pdf = st.session_state.get("processed_pdf")
     paper_id = str((processed_pdf or {}).get("saved_file", {}).get("paper_id") or "")
-    index_state = local_index_state(paper_id) if paper_id else {"vector": "未知", "bm25": "未知"}
+    index_state = local_index_state(paper_id, allow_db=False) if paper_id else {"vector": "未知", "bm25": "未知"}
     rag_ready = index_state.get("vector") == "已构建" or index_state.get("bm25") == "已构建"
 
     st.sidebar.markdown(
         f"""
-        <div class="pm-sidebar-brand">
-          <div class="pm-sidebar-logo">PM</div>
-          <div class="pm-sidebar-brand-title">PaperMate</div>
-          <div class="pm-sidebar-brand-subtitle">本地 RAG 论文阅读器</div>
-        </div>
+          <div class="pm-sidebar-brand">
+            <div class="pm-sidebar-logo">PM</div>
+            <div class="pm-sidebar-brand-title">PaperMate</div>
+            <div class="pm-sidebar-brand-subtitle">RAG 论文阅读器</div>
+          </div>
         <div class="pm-user-pill">
           当前用户
           <strong>{html.escape(str(user["username"]))}</strong>
@@ -2129,13 +2487,11 @@ def render_sidebar(user: dict[str, Any]) -> str:
         f"""
         <div class="pm-sidebar-footer">
           <div class="pm-badges">
-            {render_status_badge("本地模式", "success")}
             {render_status_badge("私有存储", "primary")}
           </div>
           <div style="margin-top:10px;">{render_status_badge("RAG 就绪" if rag_ready else "RAG 未就绪", "success" if rag_ready else "warning")}</div>
           <div style="margin-top:10px;">{render_status_badge(f"角色 {role}", "info")}</div>
-          <div style="margin-top:10px;">版本：v{html.escape(__version__)}</div>
-          <div>PDF 解析 · Hybrid RAG · 文献卡片</div>
+          <div style="margin-top:10px;">版本：{html.escape(__version__)}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -2171,7 +2527,6 @@ def render_index_builder(chunks: list[dict[str, Any]]) -> None:
           <div class="pm-section-heading">
             <div>
               <h3 class="pm-section-title">构建论文索引</h3>
-              <p class="pm-section-description">同时构建 Chroma 向量索引和 BM25 关键词索引，问答时会自动做 Hybrid Retrieval + RRF 融合排序。</p>
             </div>
             <div class="pm-badges">
               {render_status_badge(f"向量 {index_state['vector']}", index_status_type(index_state['vector']))}
@@ -2199,20 +2554,11 @@ def render_index_builder(chunks: list[dict[str, Any]]) -> None:
         disabled=not can_edit or index_busy,
     ):
         try:
-            paper = get_accessible_paper(paper_id, current_user_id(), minimum_role="editor")
-            if not paper:
-                raise PermissionError("没有找到当前论文或无权构建索引。")
-            enqueue_job(
-                "index",
-                user_id=current_user_id(),
-                team_id=int(paper["team_id"]),
-                project_id=paper.get("project_id"),
-                paper_id=paper_id,
-                payload={"paper_id": paper_id},
-            )
-            update_paper_status(paper_id, index_status="running")
-            st.session_state[f"index_state_{paper_id}"] = {"vector": "构建中", "bm25": "构建中"}
-            st.success("论文已在后台排队解析中，请稍后刷新查看结果")
+            job_id, reused_existing = enqueue_index_build_for_paper(paper_id)
+            if reused_existing:
+                st.info(f"索引任务已在队列中：#{job_id}。worker 会按顺序构建。")
+            else:
+                st.success(f"论文索引已入队：#{job_id}。worker 会在后台构建 Chroma 与 BM25 索引。")
         except Exception as exc:
             logger.exception("Index job enqueue failed. paper_id=%s", paper_id)
             render_error_card("索引任务创建失败", "请检查团队权限和数据库状态。", str(exc))
@@ -2390,13 +2736,13 @@ def render_qa_box(paper_id: str) -> None:
     can_edit = can_write(team_context["role"])
     index_state = local_index_state(paper_id)
     index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
+    index_busy = index_state["vector"] in {"排队中", "构建中"} or index_state["bm25"] in {"排队中", "构建中"}
     st.markdown(
         f"""
         <div class="pm-ask-card">
           <div class="pm-section-heading">
             <div>
               <h3 class="pm-section-title">Ask PaperMate</h3>
-              <p class="pm-section-description">只基于论文原文和引用片段回答，适合追问方法、实验、贡献和局限。</p>
             </div>
             <div class="pm-badges">
               {render_status_badge(f"向量 {index_state['vector']}", index_status_type(index_state['vector']))}
@@ -2415,6 +2761,21 @@ def render_qa_box(paper_id: str) -> None:
             "先构建论文索引",
             icon="🧭",
         )
+        if can_edit:
+            if index_busy:
+                st.info("索引任务已经在后台排队或构建中。完成后即可开始问答。")
+            elif st.button("排队构建论文索引", type="primary", use_container_width=True, key=f"qa_enqueue_index_{paper_id}"):
+                try:
+                    job_id, reused_existing = enqueue_index_build_for_paper(paper_id)
+                    if reused_existing:
+                        st.info(f"索引任务已在队列中：#{job_id}。")
+                    else:
+                        st.success(f"论文索引已入队：#{job_id}。worker 完成后即可问答。")
+                except Exception as exc:
+                    logger.exception("Index job enqueue from QA failed. paper_id=%s", paper_id)
+                    render_error_card("索引任务创建失败", "请检查团队权限和数据库状态。", str(exc))
+        else:
+            st.caption("当前团队角色为只读，不能创建索引任务。")
         return
 
     if not can_edit:
@@ -2515,7 +2876,6 @@ def render_literature_card_save(
           <div class="pm-section-heading">
             <div>
               <h3 class="pm-section-title">生成文献卡片</h3>
-              <p class="pm-section-description">从当前论文中提取研究问题、方法、贡献、实验、局限性和个人笔记，沉淀为可管理的研究卡片。</p>
             </div>
             <div class="pm-badges">{render_status_badge("Markdown 可编辑", "primary")}</div>
           </div>
@@ -2929,6 +3289,255 @@ def inject_global_css() -> None:
         .pm-badge-success { background: #F0FDF4; color: #15803D; border-color: #BBF7D0; }
         .pm-badge-warning { background: #FFFBEB; color: #B45309; border-color: #FDE68A; }
         .pm-badge-danger { background: #FEF2F2; color: #B91C1C; border-color: #FECACA; }
+        .pm-queue-bar {
+          position: fixed;
+          top: 92px;
+          right: 22px;
+          width: 276px;
+          min-width: 0;
+          max-height: calc(100vh - 120px);
+          z-index: 999999;
+          border: 1px solid rgba(148,163,184,.26);
+          border-radius: 16px;
+          background:
+            linear-gradient(135deg, rgba(255,255,255,.96), rgba(248,250,252,.90)),
+            linear-gradient(90deg, rgba(79,70,229,.08), rgba(8,145,178,.08));
+          box-shadow: 0 14px 34px rgba(15,23,42,.10);
+          padding: 11px 12px;
+          margin: 0;
+          backdrop-filter: blur(14px);
+        }
+        .pm-queue-idle {
+          background: rgba(255,255,255,.94);
+          box-shadow: 0 6px 18px rgba(15,23,42,.06);
+        }
+        .pm-queue-header {
+          display: block;
+        }
+        .pm-queue-title {
+          font-size: 13px;
+          font-weight: 850;
+          color: var(--pm-text);
+          line-height: 1.3;
+        }
+        .pm-queue-subtitle {
+          color: var(--pm-muted);
+          font-size: 11px;
+          line-height: 1.35;
+          margin-top: 3px;
+        }
+        .pm-queue-body {
+          display: grid;
+          grid-template-columns: 8px minmax(0, 1fr);
+          gap: 10px;
+          align-items: stretch;
+          margin-top: 10px;
+        }
+        .pm-queue-current {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 8px;
+        }
+        .pm-queue-lane {
+          min-width: 0;
+          border: 1px solid rgba(148,163,184,.25);
+          border-radius: 10px;
+          background: rgba(255,255,255,.74);
+          padding: 8px 9px 8px 10px;
+          box-shadow: inset 3px 0 0 rgba(148,163,184,.42);
+        }
+        .pm-queue-lane-active {
+          background: #F8FFFD;
+          border-color: rgba(20,184,166,.28);
+          box-shadow: inset 3px 0 0 #14B8A6, 0 8px 18px rgba(20,184,166,.08);
+        }
+        .pm-queue-lane-queued {
+          background: #F8FAFF;
+          border-color: rgba(79,70,229,.22);
+          box-shadow: inset 3px 0 0 var(--pm-primary);
+        }
+        .pm-queue-lane-blocked {
+          background: #FFFBEB;
+          border-color: rgba(217,119,6,.24);
+          box-shadow: inset 3px 0 0 var(--pm-warning);
+        }
+        .pm-queue-lane-idle {
+          background: rgba(248,250,252,.74);
+        }
+        .pm-queue-lane-label {
+          color: var(--pm-muted);
+          font-size: 11px;
+          font-weight: 850;
+          line-height: 1.1;
+        }
+        .pm-queue-lane-paper {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: var(--pm-text);
+          font-size: 12px;
+          font-weight: 850;
+          line-height: 1.25;
+          margin-top: 3px;
+        }
+        .pm-queue-lane-state {
+          color: var(--pm-muted);
+          font-size: 10px;
+          line-height: 1.2;
+          margin-top: 2px;
+        }
+        .pm-queue-lane-active .pm-queue-lane-state {
+          color: #0F766E;
+          font-weight: 850;
+        }
+        .pm-queue-lane-queued .pm-queue-lane-state {
+          color: #4338CA;
+          font-weight: 850;
+        }
+        .pm-queue-lane-blocked .pm-queue-lane-state {
+          color: #B45309;
+          font-weight: 850;
+        }
+        .pm-queue-track {
+          position: relative;
+          width: 8px;
+          height: 100%;
+          min-height: 112px;
+          border-radius: 999px;
+          background: #E2E8F0;
+          overflow: hidden;
+          margin: 0;
+        }
+        .pm-queue-idle .pm-queue-track {
+          background: #E2E8F0;
+          min-height: 48px;
+        }
+        .pm-queue-track::before {
+          display: none;
+        }
+        .pm-queue-fill {
+          position: absolute;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          width: 100%;
+          border-radius: inherit;
+          background: linear-gradient(180deg, var(--pm-primary), var(--pm-cyan), var(--pm-success));
+          box-shadow: 0 0 14px rgba(8,145,178,.18);
+          transition: height 180ms ease;
+          overflow: hidden;
+        }
+        .pm-queue-fill::after {
+          display: none;
+        }
+        .pm-queue-fill-idle {
+          background: transparent;
+          box-shadow: none;
+          animation: none;
+          transition: none;
+        }
+        .pm-queue-fill-idle::after {
+          display: none;
+        }
+        .pm-queue-idle-card {
+          border: 1px solid rgba(148,163,184,.22);
+          border-radius: 10px;
+          background: rgba(248,250,252,.78);
+          color: var(--pm-muted);
+          font-size: 12px;
+          line-height: 1.45;
+          padding: 10px;
+        }
+        .pm-queue-popover {
+          display: none;
+          position: absolute;
+          left: 0;
+          right: 0;
+          top: calc(100% + 8px);
+          width: auto;
+          max-height: calc(100vh - 330px);
+          overflow-y: auto;
+          z-index: 50;
+          border: 1px solid var(--pm-border);
+          border-radius: 14px;
+          background: rgba(255,255,255,.98);
+          box-shadow: 0 18px 45px rgba(15,23,42,.14);
+          padding: 11px;
+          backdrop-filter: blur(12px);
+        }
+        .pm-queue-bar:hover .pm-queue-popover {
+          display: block;
+        }
+        .pm-queue-popover-title {
+          color: var(--pm-muted);
+          font-size: 12px;
+          font-weight: 850;
+          margin-bottom: 7px;
+        }
+        .pm-queue-row {
+          display: grid;
+          grid-template-columns: 64px minmax(0, 1fr) 88px;
+          gap: 8px;
+          align-items: center;
+          padding: 8px 0;
+          border-top: 1px solid #EEF2F7;
+          font-size: 12px;
+        }
+        .pm-queue-row:first-of-type {
+          border-top: 0;
+        }
+        .pm-queue-type {
+          color: #0E7490;
+          font-weight: 850;
+        }
+        .pm-queue-paper {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: var(--pm-text);
+          font-weight: 750;
+        }
+        .pm-queue-meta {
+          color: var(--pm-muted);
+          text-align: right;
+          white-space: nowrap;
+        }
+        .pm-queue-empty, .pm-queue-more {
+          color: var(--pm-muted);
+          font-size: 12px;
+          padding: 8px 0 2px;
+        }
+        .pm-queue-more {
+          border-top: 1px solid #EEF2F7;
+          margin-top: 2px;
+        }
+        @media (min-width: 1180px) {
+          .stApp:has(.pm-queue-bar) .block-container {
+            padding-right: 318px;
+          }
+        }
+        @media (max-width: 760px) {
+          .pm-queue-bar {
+            left: 10px;
+            right: 10px;
+            top: auto;
+            bottom: 14px;
+            width: auto;
+          }
+          .pm-queue-popover {
+            left: 0;
+            right: 0;
+            top: auto;
+            bottom: calc(100% + 8px);
+            width: auto;
+            max-height: 48vh;
+          }
+          .pm-queue-row {
+            grid-template-columns: 52px minmax(0, 1fr) 64px;
+          }
+        }
         .pm-sidebar-brand, .pm-user-pill, .pm-sidebar-footer {
           border: 1px solid var(--pm-border);
           border-radius: 16px;
@@ -3518,12 +4127,10 @@ def render_metric_card(
 
 
 def render_section_card(title: str, description: str | None = None) -> None:
-    description_html = f'<p class="pm-section-description">{html.escape(description)}</p>' if description else ""
     st.markdown(
         f"""
         <div class="pm-section-card">
           <h3 class="pm-section-title">{html.escape(title)}</h3>
-          {description_html}
         </div>
         """,
         unsafe_allow_html=True,
@@ -3537,13 +4144,12 @@ def render_auth_page() -> None:
         <div class="pm-auth-shell">
           <div>
             <div class="pm-auth-intro">
-              <div class="pm-badges" style="justify-content:center;margin-bottom:14px;">
-                {render_status_badge("本地运行", "success")}
+                <div class="pm-badges" style="justify-content:center;margin-bottom:14px;">
                 {render_status_badge("数据私有", "primary")}
                 {render_status_badge("可信引用", "info")}
               </div>
               <h1>PaperMate</h1>
-              <p>本地运行的论文阅读 RAG 助手。上传 PDF，解析正文，基于原文引用问答，并沉淀文献卡片。</p>
+              <p>论文阅读 RAG 助手</p>
             </div>
           </div>
         </div>
@@ -3556,7 +4162,6 @@ def render_auth_page() -> None:
             st.markdown(
                 """
                 <h2 class="pm-auth-title">欢迎回来</h2>
-                <p class="pm-auth-subtitle">继续你的论文阅读与研究整理。</p>
                 """,
                 unsafe_allow_html=True,
             )
@@ -3594,7 +4199,6 @@ def render_auth_page() -> None:
                             set_current_user(user)
                             st.toast("账户已创建。")
                             st.rerun()
-            render_privacy_note()
 
 
 
@@ -3651,17 +4255,109 @@ def load_paper_into_workspace(paper: dict[str, Any], signature: str | None = Non
     processed_pdf = paper_to_processed_pdf(paper)
     if signature:
         processed_pdf["signature"] = signature
+    processed_pdf["paper_status_signature"] = paper_status_signature(paper)
     st.session_state["processed_pdf"] = processed_pdf
     return processed_pdf
 
 
-def enqueue_uploaded_pdf_parse(
+def paper_status_signature(paper: dict[str, Any] | None) -> str:
+    """Return the metadata signature that controls workspace reload decisions."""
+    if not paper:
+        return ""
+    return "|".join(
+        str(paper.get(key) or "")
+        for key in (
+            "paper_id",
+            "updated_at",
+            "parse_status",
+            "index_status",
+            "translation_status",
+        )
+    )
+
+
+def should_reload_processed_pdf(processed_pdf: dict[str, Any] | None, paper: dict[str, Any] | None) -> bool:
+    """Return whether paper metadata changes require reading chunks/Markdown again."""
+    if not processed_pdf or not paper:
+        return False
+    current_paper_id = str((processed_pdf.get("saved_file") or {}).get("paper_id") or "")
+    new_paper_id = str(paper.get("paper_id") or "")
+    if current_paper_id != new_paper_id:
+        return True
+
+    parse_status = str(paper.get("parse_status") or "")
+    current_parse_status_value = current_parse_status(processed_pdf)
+    if parse_status == "succeeded" and current_parse_status_value != "succeeded":
+        return True
+    if parse_status == "succeeded" and not processed_pdf.get("chunks"):
+        return True
+    return False
+
+
+def update_processed_pdf_metadata(
+    processed_pdf: dict[str, Any],
+    paper: dict[str, Any],
+    signature: str | None = None,
+) -> dict[str, Any]:
+    """Update lightweight paper fields without re-reading chunks or Markdown."""
+    saved_file = dict(processed_pdf.get("saved_file") or {})
+    saved_file.update(
+        {
+            "file_name": paper.get("file_name") or saved_file.get("file_name") or "",
+            "paper_id": paper.get("paper_id") or saved_file.get("paper_id") or "",
+            "file_size_bytes": int(paper.get("file_size_bytes") or saved_file.get("file_size_bytes") or 0),
+            "file_size": format_file_size(int(paper.get("file_size_bytes") or saved_file.get("file_size_bytes") or 0)),
+            "save_path": paper.get("save_path") or saved_file.get("save_path") or "",
+            "file_sha256": paper.get("file_sha256") or saved_file.get("file_sha256") or "",
+        }
+    )
+    processed_pdf["saved_file"] = saved_file
+
+    parsed_pdf = dict(processed_pdf.get("parsed_pdf") or {})
+    parsed_pdf.update(
+        {
+            "paper_id": paper.get("paper_id") or parsed_pdf.get("paper_id"),
+            "page_count": int(paper.get("page_count") or parsed_pdf.get("page_count") or 0),
+            "parser": paper.get("parser") or parsed_pdf.get("parser") or "persisted",
+            "markdown_path": paper.get("markdown_path") or parsed_pdf.get("markdown_path"),
+            "translated_markdown_path": paper.get("translated_markdown_path") or parsed_pdf.get("translated_markdown_path"),
+            "content_list_path": paper.get("content_list_path") or parsed_pdf.get("content_list_path"),
+        }
+    )
+    processed_pdf["parsed_pdf"] = parsed_pdf
+    processed_pdf["total_chars"] = int(paper.get("total_chars") or processed_pdf.get("total_chars") or 0)
+    processed_pdf["team_id"] = paper.get("team_id")
+    processed_pdf["project_id"] = paper.get("project_id")
+    processed_pdf["parse_status"] = paper.get("parse_status") or "unknown"
+    processed_pdf["index_status"] = paper.get("index_status") or "unknown"
+    processed_pdf["translation_status"] = paper.get("translation_status") or "not_started"
+    processed_pdf["paper_status_signature"] = paper_status_signature(paper)
+    if signature:
+        processed_pdf["signature"] = signature
+    st.session_state["processed_pdf"] = processed_pdf
+    return processed_pdf
+
+
+def refresh_workspace_paper(processed_pdf: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Refresh current workspace metadata, loading heavy paper content only when needed."""
+    paper_id = str((processed_pdf.get("saved_file") or {}).get("paper_id") or "")
+    if not paper_id:
+        return processed_pdf, None
+    paper = get_accessible_paper(paper_id, current_user_id())
+    if not paper:
+        return processed_pdf, None
+    if should_reload_processed_pdf(processed_pdf, paper):
+        return load_paper_into_workspace(paper, signature=processed_pdf.get("signature")), paper
+    return update_processed_pdf_metadata(processed_pdf, paper, signature=processed_pdf.get("signature")), paper
+
+
+def save_uploaded_pdf_to_library(
     uploaded_file: UploadedFile,
     team_id: int,
     project_id: int | None,
     signature: str | None = None,
 ) -> dict[str, Any]:
-    """Save an uploaded PDF, add it to the library, and enqueue parse plus auto-index."""
+    """Save an uploaded PDF and enqueue parsing plus indexing jobs."""
     file_bytes = uploaded_file.getvalue()
     digest = file_sha256(file_bytes)
     existing_paper = find_team_paper_by_hash(
@@ -3670,12 +4366,18 @@ def enqueue_uploaded_pdf_parse(
         statuses=("succeeded", "running", "queued", "failed"),
     )
     if existing_paper:
+        pipeline = enqueue_upload_processing_pipeline(existing_paper)
+        refreshed_paper = get_accessible_paper(str(existing_paper["paper_id"]), current_user_id())
         return {
-            "paper": existing_paper,
-            "job_id": None,
+            "paper": refreshed_paper or existing_paper,
+            "job_id": pipeline.get("parse_job_id"),
+            "parse_job_id": pipeline.get("parse_job_id"),
+            "index_job_id": pipeline.get("index_job_id"),
+            "parse_reused": pipeline.get("parse_reused", False),
+            "index_reused": pipeline.get("index_reused", False),
             "reused": True,
             "signature": signature,
-            "message": "团队中已经存在相同 PDF，已打开已有论文或后台任务，未重复创建 MinerU 解析任务。",
+            "message": upload_processing_message(True, pipeline),
         }
 
     saved_file = save_uploaded_pdf(uploaded_file)
@@ -3689,33 +4391,67 @@ def enqueue_uploaded_pdf_parse(
             "team_id": team_id,
             "project_id": project_id,
             "file_sha256": saved_file.get("file_sha256", digest),
-            "parse_status": "queued",
-            "index_status": "queued",
+            "parse_status": "not_started",
+            "index_status": "unknown",
             "translation_status": "not_started",
             "page_count": 0,
             "total_chars": 0,
         },
         [],
     )
-    job_id = enqueue_job(
-        "parse",
-        user_id=current_user_id(),
-        team_id=team_id,
-        project_id=project_id,
-        paper_id=saved_file["paper_id"],
-        payload={
-            "paper_id": saved_file["paper_id"],
-            "save_path": saved_file["save_path"],
-            "auto_index": True,
-        },
-    )
     paper = get_accessible_paper(saved_file["paper_id"], current_user_id())
+    if not paper:
+        raise RuntimeError("saved paper is not accessible after upload")
+    pipeline = enqueue_upload_processing_pipeline(paper)
+    paper = get_accessible_paper(saved_file["paper_id"], current_user_id()) or paper
     return {
         "paper": paper,
-        "job_id": job_id,
+        "job_id": pipeline.get("parse_job_id"),
+        "parse_job_id": pipeline.get("parse_job_id"),
+        "index_job_id": pipeline.get("index_job_id"),
+        "parse_reused": pipeline.get("parse_reused", False),
+        "index_reused": pipeline.get("index_reused", False),
         "reused": False,
         "signature": signature,
-        "message": f"已自动开始解析任务：#{job_id}。解析完成后 worker 会自动构建索引。",
+        "message": upload_processing_message(False, pipeline),
+    }
+
+
+def enqueue_paper_parse(paper_id: str, include_images: bool = False) -> dict[str, Any]:
+    """Queue parsing for an existing paper without automatically enqueueing an index build."""
+    paper = get_accessible_paper(paper_id, current_user_id(), minimum_role="editor")
+    if not paper:
+        raise PermissionError("没有找到当前论文或无权解析。")
+
+    latest_parse_job = latest_job_for_paper(int(paper["team_id"]), paper_id, "parse")
+    if latest_parse_job and latest_parse_job.get("status") in {"queued", "running"}:
+        return {
+            "parse_job_id": int(latest_parse_job["job_id"]),
+            "index_job_id": None,
+            "reused": True,
+            "message": f"解析任务已在队列中：#{latest_parse_job['job_id']}。",
+        }
+
+    update_paper_status(paper_id, parse_status="queued", index_status="unknown")
+    parse_job_id = enqueue_job(
+        "parse",
+        user_id=current_user_id(),
+        team_id=int(paper["team_id"]),
+        project_id=paper.get("project_id"),
+        paper_id=paper_id,
+        payload={
+            "paper_id": paper_id,
+            "save_path": paper.get("save_path"),
+            "auto_index": False,
+            "include_images": bool(include_images),
+        },
+    )
+    image_note = "，包含图片识别" if include_images else ""
+    return {
+        "parse_job_id": int(parse_job_id),
+        "index_job_id": None,
+        "reused": False,
+        "message": f"已提交解析任务：#{parse_job_id}{image_note}。解析完成后可手动选择是否构建索引。",
     }
 
 
@@ -3749,18 +4485,26 @@ def render_parse_progress_panel(processed_pdf: dict[str, Any]) -> tuple[dict[str
         st.session_state.pop("processed_pdf", None)
         return processed_pdf, False
 
-    refreshed_pdf = load_paper_into_workspace(paper, signature=processed_pdf.get("signature"))
+    if should_reload_processed_pdf(processed_pdf, paper):
+        refreshed_pdf = load_paper_into_workspace(paper, signature=processed_pdf.get("signature"))
+    else:
+        refreshed_pdf = update_processed_pdf_metadata(processed_pdf, paper, signature=processed_pdf.get("signature"))
     parse_status = current_parse_status(refreshed_pdf)
+    if parse_status == "succeeded" and not refreshed_pdf.get("chunks"):
+        refreshed_pdf = load_paper_into_workspace(paper, signature=processed_pdf.get("signature"))
+        parse_status = current_parse_status(refreshed_pdf)
     if parse_status == "succeeded":
         return refreshed_pdf, True
 
     saved_file = refreshed_pdf.get("saved_file", {})
+    team_context = current_team_context()
+    can_edit = can_write(team_context["role"])
+    parse_busy = parse_status in {"queued", "running"}
     status_type = "danger" if parse_status == "failed" else "warning" if parse_status in {"queued", "running"} else "default"
     st.markdown(
         (
             '<div class="pm-panel">'
             '<h3 class="pm-section-title">当前论文已进入工作台</h3>'
-            '<p class="pm-section-description">论文已经保存到论文库，并绑定到当前工作台。后台会先解析 PDF，再自动构建索引；完成后可直接在这里继续阅读、问答和生成卡片。</p>'
             '<div class="pm-file-capsule">'
             '<div><strong>{file_name}</strong>'
             '<div class="pm-card-meta">{file_size} · paper_id: {paper_id}</div></div>'
@@ -3776,7 +4520,32 @@ def render_parse_progress_panel(processed_pdf: dict[str, Any]) -> tuple[dict[str
         ),
         unsafe_allow_html=True,
     )
-    render_jobs_panel(int(paper["team_id"]), paper_id=paper_id)
+    if not parse_busy:
+        include_images = st.checkbox(
+            "本次解析包含图片识别",
+            value=False,
+            key=f"pending_parse_include_images_{paper_id}",
+            disabled=not can_edit,
+        )
+        if include_images:
+            st.warning("如果图片数量较多可能需要数十分钟")
+        if st.button(
+            "解析当前论文" if not include_images else "添加图片并解析当前论文",
+            type="primary",
+            use_container_width=True,
+            key=f"enqueue_parse_{paper_id}",
+            disabled=not can_edit,
+        ):
+            try:
+                result = enqueue_paper_parse(paper_id, include_images=include_images)
+                st.session_state["pm_workspace_notice"] = result["message"]
+                st.rerun()
+            except Exception as exc:
+                logger.exception("Parse job enqueue failed. paper_id=%s", paper_id)
+                render_error_card("解析任务创建失败", "请检查团队权限、任务队列和 SQLite 写入状态。", str(exc))
+        if not can_edit:
+            st.caption("当前团队角色为只读，无法创建解析任务。")
+
     action_cols = st.columns([0.5, 0.5], gap="small")
     with action_cols[0]:
         if st.button("刷新解析结果", type="primary", use_container_width=True, key=f"refresh_parse_{paper_id}"):
@@ -3785,9 +4554,11 @@ def render_parse_progress_panel(processed_pdf: dict[str, Any]) -> tuple[dict[str
         if st.button("打开论文库", use_container_width=True, key=f"open_library_from_pending_{paper_id}"):
             navigate_to_page("📚 论文库")
     if parse_status == "failed":
-        st.warning("解析任务失败。请在上方任务面板查看错误信息，修复配置或网络问题后点击“重试”。")
+        st.warning("解析任务失败。请检查右侧队列状态，修复配置或网络问题后重新提交任务。")
+    elif parse_busy:
+        st.info("请保持 worker 运行并耐心等待。解析成功后，如已有索引任务会继续排队执行；也可以手动构建索引。点击刷新即可查看最新状态。")
     else:
-        st.info("请保持 worker 运行并耐心等待。解析成功后会继续自动构建索引，点击刷新即可查看最新状态。")
+        st.info("当前论文还没有进入解析队列。点击上方按钮后，worker 会处理你选择的论文。")
     return refreshed_pdf, False
 
 
@@ -3814,7 +4585,7 @@ def render_delete_papers_dialog(team_id: int, paper_ids: list[str], file_names: 
 
     count = len(clean_ids)
     dialog_key = hashlib.sha1("|".join(clean_ids).encode("utf-8")).hexdigest()[:12]
-    st.warning("删除后会移出论文库，并清理对应 chunks、文献卡片、后台任务记录和本地 PDF/Markdown/BM25 文件。该操作不可恢复。")
+    st.warning("删除后会移出论文库，并清理对应 chunks、文献卡片、后台任务记录和 PDF/Markdown/BM25 文件。该操作不可恢复。")
     for name in file_names[:8]:
         st.write(f"- {name}")
     if len(file_names) > 8:
@@ -3838,7 +4609,7 @@ def render_delete_papers_dialog(team_id: int, paper_ids: list[str], file_names: 
                 st.session_state.pop("paper_library_selected_paper_id", None)
                 st.toast(f"已删除 {result['deleted']} 篇论文。")
                 if result.get("file_errors"):
-                    st.warning("部分本地文件清理失败或被跳过：\n" + "\n".join(result["file_errors"][:8]))
+                    st.warning("部分文件清理失败或被跳过：\n" + "\n".join(result["file_errors"][:8]))
                 st.rerun()
             except Exception as exc:
                 logger.exception("Paper deletion failed.")
@@ -3871,7 +4642,7 @@ def render_paper_library_page() -> None:
             format_func=lambda value: "全部项目" if int(value) == 0 else next(project["name"] for project in projects if int(project["project_id"]) == int(value)),
         )
     with filter_cols[1]:
-        parse_filter = st.selectbox("解析状态", ["全部", "queued", "running", "succeeded", "failed"])
+        parse_filter = st.selectbox("解析状态", ["全部", "not_started", "queued", "running", "succeeded", "failed"])
     with filter_cols[2]:
         index_filter = st.selectbox("索引状态", ["全部", "unknown", "running", "succeeded", "failed", "partial"])
     with filter_cols[3]:
@@ -3903,7 +4674,7 @@ def render_paper_library_page() -> None:
                 key="paper_library_batch_uploads",
             )
             if st.button(
-                "添加并自动解析/索引",
+                "添加到论文库",
                 type="primary",
                 use_container_width=True,
                 disabled=not library_uploads,
@@ -3912,10 +4683,10 @@ def render_paper_library_page() -> None:
                 created = 0
                 reused = 0
                 errors: list[str] = []
-                with st.spinner("正在保存 PDF 并创建自动解析与索引任务，请耐心等待..."):
+                with st.spinner("正在保存 PDF 并创建解析与索引任务..."):
                     for upload in library_uploads or []:
                         try:
-                            result = enqueue_uploaded_pdf_parse(upload, team_id, int(upload_project_id))
+                            result = save_uploaded_pdf_to_library(upload, team_id, int(upload_project_id))
                             if result.get("reused"):
                                 reused += 1
                             else:
@@ -3926,7 +4697,7 @@ def render_paper_library_page() -> None:
                 if errors:
                     render_error_card("部分论文添加失败", "请检查文件、权限、SQLite 状态或解析配置。", "\n".join(errors[:8]))
                 else:
-                    st.success(f"已添加 {created} 篇论文；复用已有论文/任务 {reused} 篇。worker 会自动解析并构建索引。")
+                    st.success(f"已添加 {created} 篇论文；复用已有论文 {reused} 篇。上传后已自动加入解析和索引队列。")
                     st.rerun()
     elif can_edit:
         st.info("当前团队还没有项目，请先在团队管理中创建项目后再批量添加论文。")
@@ -3949,10 +4720,10 @@ def render_paper_library_page() -> None:
     with metric_cols[2]:
         render_metric_card("已索引", sum(1 for paper in papers if paper.get("index_status") == "succeeded"), "可进行问答", icon="R")
     with metric_cols[3]:
-        render_metric_card("任务中", sum(1 for paper in papers if paper.get("parse_status") in {"queued", "running"} or paper.get("index_status") == "running"), "后台处理", icon="J")
+        render_metric_card("任务中", sum(1 for paper in papers if paper.get("parse_status") in {"queued", "running"} or paper.get("index_status") in {"queued", "running"}), "后台处理", icon="J")
 
     if not papers:
-        render_empty_state("当前没有论文", "在论文工作台上传 PDF 后，解析任务和历史论文会显示在这里。", "去论文工作台", icon="PDF")
+        render_empty_state("当前没有论文", "在论文工作台上传 PDF 后，论文会显示在这里，并自动进入解析和索引队列。", "去论文工作台", icon="PDF")
         if st.button("去论文工作台", type="primary", use_container_width=True):
             navigate_to_page("📄 论文工作台")
         return
@@ -3996,7 +4767,7 @@ def render_paper_library_page() -> None:
     with toolbar_cols[1]:
         selected_count = len(selected_paper_ids_before)
         st.caption(
-            f"已选 {selected_count} 篇；点击行可预览 PDF，解析完成后可打开到工作台。"
+            f"已选 {selected_count} 篇；点击行可预览 PDF，并手动选择解析或索引任务。"
             if selected_count
             else "点击行可预览 PDF；开启多选后可批量选择论文。"
         )
@@ -4070,10 +4841,54 @@ def render_paper_library_page() -> None:
     with open_cols[1]:
         if st.button("刷新论文库", use_container_width=True):
             st.rerun()
+    if can_edit:
+        st.markdown("#### 手动任务")
+        task_cols = st.columns([0.34, 0.33, 0.33], gap="small")
+        parse_status = str(selected_paper.get("parse_status") or "")
+        index_status = str(selected_paper.get("index_status") or "")
+        with task_cols[0]:
+            include_images = st.checkbox(
+                "包含图片识别",
+                value=False,
+                key=f"library_parse_include_images_{selected_paper_id}",
+                disabled=parse_status in {"queued", "running"},
+            )
+        if include_images:
+            st.warning("如果图片数量较多可能需要数十分钟")
+        with task_cols[1]:
+            if st.button(
+                "解析选中论文" if not include_images else "添加图片并解析",
+                type="primary",
+                use_container_width=True,
+                disabled=parse_status in {"queued", "running"},
+                key=f"library_enqueue_parse_{selected_paper_id}",
+            ):
+                try:
+                    result = enqueue_paper_parse(selected_paper_id, include_images=include_images)
+                    st.success(result["message"])
+                    st.rerun()
+                except Exception as exc:
+                    logger.exception("Library parse enqueue failed. paper_id=%s", selected_paper_id)
+                    render_error_card("解析任务创建失败", "请检查团队权限、任务队列和 SQLite 写入状态。", str(exc))
+        with task_cols[2]:
+            if st.button(
+                "构建选中论文索引",
+                use_container_width=True,
+                disabled=parse_status != "succeeded" or index_status in {"queued", "running"},
+                key=f"library_enqueue_index_{selected_paper_id}",
+            ):
+                try:
+                    job_id, reused_existing = enqueue_index_build_for_paper(selected_paper_id)
+                    if reused_existing:
+                        st.info(f"索引任务已在队列中：#{job_id}。")
+                    else:
+                        st.success(f"索引任务已入队：#{job_id}。")
+                    st.rerun()
+                except Exception as exc:
+                    logger.exception("Library index enqueue failed. paper_id=%s", selected_paper_id)
+                    render_error_card("索引任务创建失败", "请检查解析状态、团队权限和数据库状态。", str(exc))
     st.markdown("#### 原始 PDF")
     render_pdf_viewer(selected_paper.get("save_path"))
-    with st.expander("当前论文任务", expanded=False):
-        render_jobs_panel(team_id, paper_id=selected_paper_id)
 
 
 def render_team_management_page() -> None:
@@ -4166,9 +4981,8 @@ def render_workspace_page() -> None:
     paper_id = str((processed_pdf or {}).get("saved_file", {}).get("paper_id") or "")
     if processed_pdf and paper_id:
         try:
-            latest_paper = get_accessible_paper(paper_id, current_user_id())
+            processed_pdf, latest_paper = refresh_workspace_paper(processed_pdf)
             if latest_paper:
-                processed_pdf = load_paper_into_workspace(latest_paper, signature=processed_pdf.get("signature"))
                 paper_id = str(processed_pdf.get("saved_file", {}).get("paper_id") or "")
         except Exception:
             logger.exception("Workspace paper refresh failed. paper_id=%s", paper_id)
@@ -4182,9 +4996,9 @@ def render_workspace_page() -> None:
 
     render_app_header(
         "论文工作台",
-        "上传 PDF，解析正文，构建 Hybrid RAG 索引，并基于可信引用追问论文。",
+        "上传 PDF 后自动进入解析和索引队列，并基于可信引用追问论文。",
         [
-            render_status_badge("本地运行", "success"),
+            render_status_badge("论文工作台", "success"),
             render_status_badge("可信引用", "info"),
             render_status_badge("知识沉淀", "primary"),
         ],
@@ -4192,7 +5006,7 @@ def render_workspace_page() -> None:
     render_workflow_steps(
         [
             {"title": "上传 PDF", "helper": "选择论文文件", "status": "done" if paper_open else "active"},
-            {"title": "解析正文", "helper": "Markdown 与图片", "status": "done" if parse_done else ("active" if paper_open else "pending")},
+            {"title": "解析正文", "helper": "Markdown 与表格", "status": "done" if parse_done else ("active" if paper_open else "pending")},
             {"title": "构建索引", "helper": "Chroma + BM25", "status": "done" if index_ready else ("active" if parse_done else "pending")},
             {"title": "开始问答", "helper": "基于原文引用", "status": "done" if qa_done else ("active" if index_ready else "pending")},
             {"title": "生成卡片", "helper": "沉淀研究笔记", "status": "done" if card_done else ("active" if qa_done else "pending")},
@@ -4203,9 +5017,9 @@ def render_workspace_page() -> None:
     chunks = processed_pdf.get("chunks", []) if processed_pdf else []
     metric_cols = st.columns(5)
     with metric_cols[0]:
-        render_metric_card("当前论文", saved_file.get("file_name") or "未上传", "上传 PDF 后开始解析", icon="PDF")
+        render_metric_card("当前论文", saved_file.get("file_name") or "未上传", "上传 PDF 后自动排队", icon="PDF")
     with metric_cols[1]:
-        render_metric_card("解析状态", parse_status, "正文、图片与页码", icon="MD", status="success" if parse_done else "warning")
+        render_metric_card("解析状态", parse_status, "正文、表格与页码", icon="MD", status="success" if parse_done else "warning")
     with metric_cols[2]:
         render_metric_card("Chunk 数量", len(chunks), "用于检索的论文片段", icon="CH")
     with metric_cols[3]:
@@ -4213,7 +5027,7 @@ def render_workspace_page() -> None:
     with metric_cols[4]:
         render_metric_card("BM25 状态", index_state["bm25"], "关键词精确检索", icon="B", status=index_status_type(index_state["bm25"]))
 
-    render_section_card("上传与解析", "拖拽或选择一篇 PDF。论文会立即进入论文库，并绑定到当前工作台；worker 完成解析后可直接在这里继续阅读、索引、问答和生成卡片。")
+    render_section_card("上传与解析", "拖拽或选择一篇 PDF。论文会立即进入论文库，并自动加入解析和索引队列；worker 完成后可继续阅读、问答和生成卡片。")
     workspace_notice = st.session_state.pop("pm_workspace_notice", None)
     if workspace_notice:
         st.success(str(workspace_notice))
@@ -4225,7 +5039,7 @@ def render_workspace_page() -> None:
 
     if uploaded_file is None:
         if not processed_pdf:
-            render_empty_state("还没有打开论文", "从论文库打开历史论文，或上传 PDF 创建后台解析任务。", "去论文库", icon="PDF")
+            render_empty_state("还没有打开论文", "从论文库打开历史论文，或上传 PDF 自动创建解析和索引任务。", "去论文库", icon="PDF")
             if st.button("打开论文库", type="primary", use_container_width=True):
                 navigate_to_page("📚 论文库")
             return
@@ -4238,16 +5052,16 @@ def render_workspace_page() -> None:
             <div class="pm-file-capsule">
               <div>
                 <strong>{html.escape(uploaded_file.name)}</strong>
-                <div class="pm-card-meta">{format_file_size(len(uploaded_file.getvalue()))} · 已选择，将自动解析并构建索引</div>
+                <div class="pm-card-meta">{format_file_size(len(uploaded_file.getvalue()))} · 已选择，将保存并自动排队</div>
               </div>
-              <div class="pm-badges">{render_status_badge("PDF", "primary")}{render_status_badge("本地保存", "success")}</div>
+              <div class="pm-badges">{render_status_badge("PDF", "primary")}{render_status_badge("已保存", "success")}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
         if cached_pdf:
             processed_pdf = cached_pdf
-            if st.button("重新自动解析当前 PDF", use_container_width=True):
+            if st.button("重新保存当前 PDF", use_container_width=True):
                 st.session_state.pop("processed_pdf", None)
                 st.session_state.pop("pm_failed_upload_signature", None)
                 st.session_state.pop("pm_failed_upload_error", None)
@@ -4257,25 +5071,25 @@ def render_workspace_page() -> None:
             failed_signature = st.session_state.get("pm_failed_upload_signature")
             if failed_signature == signature:
                 render_error_card(
-                    "PDF 自动解析任务创建失败",
-                    "上一次自动创建任务失败。请修复问题后点击重试，系统会重新保存 PDF、解析正文并在完成后自动构建索引。",
+                    "PDF 保存失败",
+                    "上一次保存论文失败。请修复问题后点击重试，系统会重新保存 PDF 并自动创建解析和索引任务。",
                     str(st.session_state.get("pm_failed_upload_error") or ""),
                 )
-                if st.button("重试自动解析和索引", type="primary", use_container_width=True, key="retry_auto_parse"):
+                if st.button("重试保存论文", type="primary", use_container_width=True, key="retry_auto_parse"):
                     st.session_state.pop("pm_failed_upload_signature", None)
                     st.session_state.pop("pm_failed_upload_error", None)
                     st.rerun()
             else:
                 try:
-                    with st.spinner("正在保存 PDF 并创建自动解析与索引任务，请耐心等待..."):
-                        result = enqueue_uploaded_pdf_parse(uploaded_file, team_id, project_id, signature=signature)
+                    with st.spinner("正在保存 PDF 并创建解析与索引任务..."):
+                        result = save_uploaded_pdf_to_library(uploaded_file, team_id, project_id, signature=signature)
                         paper = result.get("paper")
                         if paper:
                             load_paper_into_workspace(paper, signature=signature)
                         st.session_state.pop("pm_failed_upload_signature", None)
                         st.session_state.pop("pm_failed_upload_error", None)
                         st.session_state["pm_workspace_notice"] = (
-                            f"{result['message']} 这通常需要一些时间，请耐心等待。"
+                            result["message"]
                         )
                         st.rerun()
                 except (UploadError, PdfParseError, MinerUError) as exc:
@@ -4283,16 +5097,16 @@ def render_workspace_page() -> None:
                     st.session_state["pm_failed_upload_signature"] = signature
                     st.session_state["pm_failed_upload_error"] = f"{exc.message} 错误码：{exc.code.value}"
                     render_error_card(
-                        "PDF 自动解析任务创建失败",
+                        "PDF 保存失败",
                         f"{exc.message} 请检查文件、解析服务配置或网络连接后重试。",
                         f"错误码：{exc.code.value}",
                     )
                     processed_pdf = None
                 except Exception as exc:
-                    logger.exception("PDF parse job enqueue failed.")
+                    logger.exception("PDF library save failed.")
                     st.session_state["pm_failed_upload_signature"] = signature
                     st.session_state["pm_failed_upload_error"] = str(exc)
-                    render_error_card("PDF 自动解析任务创建失败", "请检查团队权限和 SQLite 写入权限。", str(exc))
+                    render_error_card("PDF 保存失败", "请检查团队权限和 SQLite 写入权限。", str(exc))
                     processed_pdf = None
 
     if not processed_pdf:
@@ -4363,7 +5177,7 @@ def render_card_library_page(user_id: int) -> None:
         "文献卡片库",
         "沉淀论文阅读记录、方法线索、实验结论和研究灵感。",
         [
-            render_status_badge("本地保存", "success"),
+            render_status_badge("已保存", "success"),
             render_status_badge("Markdown 可编辑", "info"),
         ],
     )
@@ -4612,6 +5426,7 @@ def render_processed_pdf_summary(processed_pdf: dict[str, Any]) -> None:
     """Render uploaded-file metadata."""
     saved_file = processed_pdf["saved_file"]
     parsed_pdf = processed_pdf["parsed_pdf"]
+    indexed_image_count = len(parsed_pdf.get("images", []))
     zh_path = parsed_translated_markdown_path(parsed_pdf)
     zh_badge = (
         render_status_badge("中文译文已生成", "success")
@@ -4622,26 +5437,69 @@ def render_processed_pdf_summary(processed_pdf: dict[str, Any]) -> None:
         (
             '<div class="pm-panel">'
             '<h3 class="pm-section-title">论文已解析</h3>'
-            '<p class="pm-section-description">文件已保存到本地，并转换为可阅读、可检索的 Markdown。中文译文只用于阅读和下载，不影响原文索引。</p>'
             '<div class="pm-file-capsule">'
             '<div><strong>{file_name}</strong>'
             '<div class="pm-card-meta">{file_size} · paper_id: {paper_id}</div></div>'
             '<div class="pm-badges">{page_badge}{image_badge}{char_badge}{zh_badge}</div>'
             '</div>'
-            '<div class="pm-card-meta">本地路径：{save_path}</div>'
             '</div>'
         ).format(
             file_name=html.escape(saved_file["file_name"]),
             file_size=html.escape(saved_file["file_size"]),
             paper_id=html.escape(saved_file["paper_id"]),
             page_badge=render_status_badge(f"页数 {parsed_pdf.get('page_count', 0)}", "info"),
-            image_badge=render_status_badge(f"图片 {len(parsed_pdf.get('images', []))} 张", "primary"),
+            image_badge=render_status_badge(
+                f"图片索引 {indexed_image_count} 张" if indexed_image_count else "图片未索引",
+                "primary" if indexed_image_count else "default",
+            ),
             char_badge=render_status_badge(f"字符 {processed_pdf.get('total_chars', 0)}", "default"),
             zh_badge=zh_badge,
-            save_path=html.escape(saved_file["save_path"]),
         ),
         unsafe_allow_html=True,
     )
+    render_reparse_controls(processed_pdf)
+
+
+def render_reparse_controls(processed_pdf: dict[str, Any]) -> None:
+    """Render explicit reparse actions for text-only or image-aware parsing."""
+    team_context = current_team_context()
+    can_edit = can_write(team_context["role"])
+    paper_id = str(processed_pdf.get("saved_file", {}).get("paper_id") or "")
+    if not paper_id:
+        return
+
+    parse_status = current_parse_status(processed_pdf)
+    busy = parse_status in {"queued", "running"}
+    with st.expander("重新解析", expanded=False):
+        include_images = st.checkbox(
+            "本次重新解析包含图片识别",
+            value=False,
+            key=f"reparse_include_images_{paper_id}",
+            disabled=not can_edit or busy,
+        )
+        if include_images:
+            st.warning("如果图片数量较多可能需要数十分钟")
+
+        button_label = "添加图片并重新解析" if include_images else "重新解析正文"
+        if st.button(
+            button_label,
+            type="primary" if include_images else "secondary",
+            use_container_width=True,
+            disabled=not can_edit or busy,
+            key=f"reparse_paper_{paper_id}",
+        ):
+            try:
+                result = enqueue_paper_parse(paper_id, include_images=include_images)
+                st.session_state["pm_workspace_notice"] = result["message"]
+                st.rerun()
+            except Exception as exc:
+                logger.exception("Paper reparse enqueue failed. paper_id=%s", paper_id)
+                render_error_card("重新解析任务创建失败", "请检查团队权限、任务队列和 SQLite 写入状态。", str(exc))
+
+        if busy:
+            st.caption("当前已有解析任务在排队或运行，完成后才能再次提交。")
+        elif not can_edit:
+            st.caption("当前角色没有重新解析权限。")
 
 
 
@@ -4687,7 +5545,7 @@ def render_translation_controls(processed_pdf: dict[str, Any]) -> None:
                             "force": bool(zh_exists),
                         },
                     )
-                    update_paper_status(processed_pdf["saved_file"]["paper_id"], translation_status="running")
+                    update_paper_status(processed_pdf["saved_file"]["paper_id"], translation_status="queued")
                     st.success(f"翻译任务已入队：#{job_id}。worker 完成后可下载中文 Markdown。")
                 except Exception as exc:
                     logger.exception("Markdown translation failed.")
@@ -4816,7 +5674,7 @@ def render_reader_translation_button(
                 "force": bool(zh_exists),
             },
         )
-        update_paper_status(paper_id, translation_status="running")
+        update_paper_status(paper_id, translation_status="queued")
         st.success(f"翻译任务已入队：#{job_id}。worker 完成后可以切换中文译文或双语对照。")
     except Exception as exc:
         logger.exception("Markdown translation failed from reader.")
@@ -5072,7 +5930,6 @@ def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
         (
             '<div class="pm-panel">'
             '<h3 class="pm-section-title">论文正文</h3>'
-            '<p class="pm-section-description">支持原文、中文译文和一段英文一段中文的双语对照阅读；RAG 问答仍默认基于原文索引和引用片段。</p>'
             '<div class="pm-toolbar" style="margin-top:12px;">'
             '{mode_badge}{parser_badge}{page_badge}{image_badge}{chunk_badge}'
             '</div></div>'
@@ -5080,7 +5937,12 @@ def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
             mode_badge=render_status_badge(reading_mode, mode_badge_type),
             parser_badge=render_status_badge(f"解析方式 {parsed_pdf.get('parser', '未知')}", "primary"),
             page_badge=render_status_badge(f"页数 {parsed_pdf.get('page_count', 0)}", "info"),
-            image_badge=render_status_badge(f"图片 {len(parsed_pdf.get('images', []))} 张", "default"),
+            image_badge=render_status_badge(
+                f"图片索引 {len(parsed_pdf.get('images', []))} 张"
+                if parsed_pdf.get("images")
+                else "图片未索引",
+                "default",
+            ),
             chunk_badge=render_status_badge(f"Chunks {len(processed_pdf.get('chunks', []))}", "success"),
         ),
         unsafe_allow_html=True,
@@ -5181,15 +6043,19 @@ def render_app() -> None:
     render_app_shell()
 
     init_db()
-    render_welcome_dialog()
-
     user = current_user()
     if not user:
         render_auth_page()
         return
 
-    prepare_user_workspace(int(user["user_id"]))
+    prepare_user_workspace_once(int(user["user_id"]))
     page = render_sidebar_navigation(user)
+    team_context = current_team_context()
+    selected_team_id = int(team_context.get("team_id") or 0)
+    if selected_team_id:
+        clear_queue_for_ui_session_once(int(user["user_id"]), team_context)
+        render_queue_clear_notice()
+        render_global_queue_progress(int(user["user_id"]), selected_team_id)
 
     if page == "论文工作台":
         render_workspace_page()

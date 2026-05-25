@@ -33,7 +33,7 @@ def get_pdf_page_count(file_path: str | Path) -> int:
         return 0
 
 
-def parse_pdf(file_path: str | Path, paper_id: str) -> dict[str, Any]:
+def parse_pdf(file_path: str | Path, paper_id: str, include_images: bool = False) -> dict[str, Any]:
     """Parse a PDF with the configured provider.
 
     Default provider is MinerU, which converts the PDF to Markdown first.
@@ -41,7 +41,7 @@ def parse_pdf(file_path: str | Path, paper_id: str) -> dict[str, Any]:
     """
     provider = settings.pdf_parse_provider.lower()
     if provider == "mineru":
-        return parse_pdf_with_mineru(file_path, paper_id)
+        return parse_pdf_with_mineru(file_path, paper_id, include_images=include_images)
     if provider == "pymupdf":
         return parse_pdf_with_pymupdf(file_path, paper_id)
 
@@ -51,10 +51,15 @@ def parse_pdf(file_path: str | Path, paper_id: str) -> dict[str, Any]:
     )
 
 
-def parse_pdf_with_mineru(file_path: str | Path, paper_id: str) -> dict[str, Any]:
+def parse_pdf_with_mineru(file_path: str | Path, paper_id: str, include_images: bool = False) -> dict[str, Any]:
     """Convert PDF to Markdown with MinerU and build page text for downstream chunks."""
     path = Path(file_path)
-    mineru_result = MinerUClient().pdf_to_markdown(path, paper_id, file_name=path.name)
+    mineru_result = MinerUClient().pdf_to_markdown(
+        path,
+        paper_id,
+        file_name=path.name,
+        include_images=include_images,
+    )
 
     content_list = mineru_result.get("content_list")
     # MinerU's content_list preserves page-level structure; if it is missing,

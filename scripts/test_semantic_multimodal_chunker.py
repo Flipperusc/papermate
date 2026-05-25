@@ -49,10 +49,31 @@ class FailingVLMClient:
         raise RuntimeError("Image file not found for VLM description:")
 
 
+class CountingVLMClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def describe(self, image: dict) -> str:
+        self.calls += 1
+        return f"counted VLM description {self.calls} for {image.get('caption')}"
+
+
+class CountingFailingVLMClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def describe(self, image: dict) -> str:
+        self.calls += 1
+        raise RuntimeError("temporary VLM outage")
+
+
 def main() -> None:
     test_semantic_breakpoint_and_overlap()
+    test_images_are_skipped_by_default()
     test_image_binding()
     test_image_binding_falls_back_when_vlm_fails()
+    test_vlm_image_budget_skips_remaining_images()
+    test_vlm_failure_fuse_skips_remaining_images()
     test_table_modes()
     test_legacy_pages()
     test_embedding_failure()
@@ -105,6 +126,7 @@ def test_image_binding() -> None:
         overlap=100,
         embedding_client=FakeEmbeddingClient(),
         vlm_client=FakeVLMClient(),
+        include_images=True,
     )
     assert chunks[-1]["chunk_type"] == "multimodal"
     assert chunks[-1]["images"]
@@ -133,6 +155,7 @@ def test_image_binding_falls_back_when_vlm_fails() -> None:
         overlap=100,
         embedding_client=FakeEmbeddingClient(),
         vlm_client=FailingVLMClient(),
+        include_images=True,
     )
     assert len(chunks) == 1
     image = chunks[0]["images"][0]
@@ -141,6 +164,98 @@ def test_image_binding_falls_back_when_vlm_fails() -> None:
     assert "Architecture diagram" in chunks[0]["text"]
     assert image["vlm_description"].startswith("metadata-only image")
     assert "Image file not found" in image["vlm_error"]
+
+
+def test_images_are_skipped_by_default() -> None:
+    client = CountingVLMClient()
+    chunks = chunk_pages(
+        "paper",
+        pages=[],
+        elements=[
+            {"type": "text", "order": 0, "page_num": 1, "text": "Alpha context."},
+            image_element(1, "Figure B"),
+            {"type": "text", "order": 2, "page_num": 1, "text": "Beta context."},
+        ],
+        chunk_size=512,
+        overlap=100,
+        embedding_client=FakeEmbeddingClient(),
+        vlm_client=client,
+    )
+    assert client.calls == 0
+    assert not chunk_images(chunks)
+    assert all(chunk["chunk_type"] == "text" for chunk in chunks)
+
+
+def test_vlm_image_budget_skips_remaining_images() -> None:
+    old_values = {
+        "vlm_enabled": settings.vlm_enabled,
+        "vlm_max_images_per_paper": settings.vlm_max_images_per_paper,
+        "vlm_max_failures_per_paper": settings.vlm_max_failures_per_paper,
+    }
+    try:
+        object.__setattr__(settings, "vlm_enabled", True)
+        object.__setattr__(settings, "vlm_max_images_per_paper", 1)
+        object.__setattr__(settings, "vlm_max_failures_per_paper", 2)
+        client = CountingVLMClient()
+        chunks = chunk_pages(
+            "paper",
+            pages=[],
+            elements=[
+                image_element(0, "Figure A"),
+                image_element(1, "Figure B"),
+                image_element(2, "Figure C"),
+            ],
+            chunk_size=1024,
+            overlap=100,
+            embedding_client=FakeEmbeddingClient(),
+            vlm_client=client,
+            include_images=True,
+        )
+        images = chunk_images(chunks)
+        assert client.calls == 1
+        assert len(images) == 3
+        assert images[0]["vlm_description"].startswith("counted VLM description")
+        assert images[1]["vlm_skipped"] == "budget_exhausted"
+        assert images[1]["vlm_description"].startswith("metadata-only image")
+        assert images[2]["vlm_skipped"] == "budget_exhausted"
+    finally:
+        for name, value in old_values.items():
+            object.__setattr__(settings, name, value)
+
+
+def test_vlm_failure_fuse_skips_remaining_images() -> None:
+    old_values = {
+        "vlm_enabled": settings.vlm_enabled,
+        "vlm_max_images_per_paper": settings.vlm_max_images_per_paper,
+        "vlm_max_failures_per_paper": settings.vlm_max_failures_per_paper,
+    }
+    try:
+        object.__setattr__(settings, "vlm_enabled", True)
+        object.__setattr__(settings, "vlm_max_images_per_paper", 10)
+        object.__setattr__(settings, "vlm_max_failures_per_paper", 1)
+        client = CountingFailingVLMClient()
+        chunks = chunk_pages(
+            "paper",
+            pages=[],
+            elements=[
+                image_element(0, "Figure A"),
+                image_element(1, "Figure B"),
+                image_element(2, "Figure C"),
+            ],
+            chunk_size=1024,
+            overlap=100,
+            embedding_client=FakeEmbeddingClient(),
+            vlm_client=client,
+            include_images=True,
+        )
+        images = chunk_images(chunks)
+        assert client.calls == 1
+        assert "temporary VLM outage" in images[0]["vlm_error"]
+        assert images[1]["vlm_skipped"] == "failure_fuse"
+        assert images[2]["vlm_skipped"] == "failure_fuse"
+    finally:
+        for name, value in old_values.items():
+            object.__setattr__(settings, name, value)
 
 
 def test_table_modes() -> None:
@@ -264,6 +379,7 @@ def test_multimodal_chain_metadata_roundtrip() -> None:
                 overlap=100,
                 embedding_client=FakeEmbeddingClient(),
                 vlm_client=FakeVLMClient(),
+                include_images=True,
             )
             assert any(chunk["chunk_type"] == "multimodal" for chunk in chunks)
             assert any(chunk["chunk_type"] == "table" for chunk in chunks)
@@ -328,6 +444,21 @@ def table_html(header: list[str], rows: list[list[str]]) -> str:
         rendered.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>")
     rendered.append("</table>")
     return "".join(rendered)
+
+
+def image_element(order: int, caption: str) -> dict:
+    return {
+        "type": "image",
+        "order": order,
+        "page_num": 1,
+        "caption": caption,
+        "alt_text": "",
+        "path": f"images/{order}.png",
+    }
+
+
+def chunk_images(chunks: list[dict]) -> list[dict]:
+    return [image for chunk in chunks for image in (chunk.get("images") or [])]
 
 
 if __name__ == "__main__":

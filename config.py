@@ -114,6 +114,10 @@ class Settings:
     vlm_timeout: float = env_float("VLM_TIMEOUT", 90.0)
     vlm_temperature: float = env_float("VLM_TEMPERATURE", 0.1)
     vlm_max_tokens: int = env_int("VLM_MAX_TOKENS", 512)
+    vlm_enabled: bool = env_bool("VLM_ENABLED", True)
+    vlm_parse_timeout: float = env_float("VLM_PARSE_TIMEOUT", 20.0)
+    vlm_max_images_per_paper: int = env_int("VLM_MAX_IMAGES_PER_PAPER", 8)
+    vlm_max_failures_per_paper: int = env_int("VLM_MAX_FAILURES_PER_PAPER", 2)
 
     # DeepSeek LLM
     deepseek_api_key: str = env_value("DEEPSEEK_API_KEY")

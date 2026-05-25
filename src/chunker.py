@@ -270,6 +270,7 @@ def chunk_pages(
     vlm_client: Any | None = None,
     table_large_row_chunk_size: int | None = None,
     table_wide_column_group_size: int | None = None,
+    include_images: bool = False,
 ) -> list[dict[str, Any]]:
     """Split parsed PDF pages/elements into semantic multimodal chunks."""
     safe_chunk_size = max(1, int(chunk_size or settings.rag_chunk_size or DEFAULT_CHUNK_SIZE))
@@ -286,6 +287,7 @@ def chunk_pages(
         vlm_client=vlm_client,
         row_chunk_size=row_chunk_size,
         column_group_size=column_group_size,
+        include_images=include_images,
     )
 
 
@@ -298,6 +300,7 @@ def chunk_elements(
     vlm_client: Any | None = None,
     row_chunk_size: int = 20,
     column_group_size: int = 9,
+    include_images: bool = False,
 ) -> list[dict[str, Any]]:
     """Chunk ordered text/image/table elements."""
     chunks: list[dict[str, Any]] = []
@@ -306,12 +309,44 @@ def chunk_elements(
     buffer_page: int | None = None
     buffer_section = ""
     active_vlm_client = vlm_client
+    vlm_attempts = 0
+    vlm_failures = 0
+    vlm_skip_logged = False
+    max_vlm_images = max(0, int(settings.vlm_max_images_per_paper or 0))
+    max_vlm_failures = max(1, int(settings.vlm_max_failures_per_paper or 1))
 
     def get_vlm_client() -> Any:
         nonlocal active_vlm_client
         if active_vlm_client is None:
-            active_vlm_client = QwenVLMClient()
+            active_vlm_client = QwenVLMClient(timeout=settings.vlm_parse_timeout)
         return active_vlm_client
+
+    def vlm_skip_reason() -> str:
+        if not settings.vlm_enabled:
+            return "disabled"
+        if max_vlm_images <= 0:
+            return "budget_zero"
+        if vlm_attempts >= max_vlm_images:
+            return "budget_exhausted"
+        if vlm_failures >= max_vlm_failures:
+            return "failure_fuse"
+        return ""
+
+    def log_vlm_skip_once(reason: str) -> None:
+        nonlocal vlm_skip_logged
+        if vlm_skip_logged:
+            return
+        vlm_skip_logged = True
+        logger.info(
+            "Skipping VLM image descriptions for remaining images. "
+            "paper_id=%s reason=%s attempts=%s failures=%s max_images=%s max_failures=%s",
+            paper_id,
+            reason,
+            vlm_attempts,
+            vlm_failures,
+            max_vlm_images,
+            max_vlm_failures,
+        )
 
     def flush_text_buffer() -> None:
         nonlocal text_buffer, buffer_page, buffer_section
@@ -352,15 +387,27 @@ def chunk_elements(
             continue
 
         if element_type == "image":
+            if not include_images:
+                continue
             flush_text_buffer()
-            bind_image_to_chunks(
+            skip_reason = vlm_skip_reason()
+            if skip_reason:
+                log_vlm_skip_once(skip_reason)
+                image_vlm_client = None
+            else:
+                image_vlm_client = get_vlm_client()
+                vlm_attempts += 1
+            image_payload = bind_image_to_chunks(
                 chunks=chunks,
                 paper_id=paper_id,
                 image_element=element,
                 current_section=current_section,
                 chunk_size=chunk_size,
-                vlm_client=get_vlm_client(),
+                vlm_client=image_vlm_client,
+                vlm_skip_reason=skip_reason,
             )
+            if image_vlm_client is not None and image_payload.get("vlm_error"):
+                vlm_failures += 1
             continue
 
         for paragraph in split_page_paragraphs(str(element.get("text") or "")):
@@ -525,10 +572,13 @@ def bind_image_to_chunks(
     image_element: dict[str, Any],
     current_section: str,
     chunk_size: int,
-    vlm_client: Any,
-) -> None:
+    vlm_client: Any | None,
+    vlm_skip_reason: str = "",
+) -> dict[str, Any]:
     """Bind an image description and metadata to the current chunk."""
     image_payload = image_metadata(image_element)
+    if vlm_skip_reason:
+        image_payload["vlm_skipped"] = vlm_skip_reason
     description = image_description(image_payload, vlm_client)
 
     if chunks and chunks[-1].get("chunk_type") != "table":
@@ -540,7 +590,7 @@ def bind_image_to_chunks(
             images.append(image_payload)
             chunks[-1]["images"] = images
             chunks[-1]["images_json"] = json.dumps(images, ensure_ascii=False)
-            return
+            return image_payload
 
     chunks.append(
         make_chunk_payload(
@@ -553,6 +603,7 @@ def bind_image_to_chunks(
             images=[image_payload],
         )
     )
+    return image_payload
 
 
 def image_metadata(element: dict[str, Any]) -> dict[str, Any]:
@@ -571,22 +622,25 @@ def image_metadata(element: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def image_description(image: dict[str, Any], vlm_client: Any) -> str:
+def image_description(image: dict[str, Any], vlm_client: Any | None) -> str:
     """Build the real VLM-backed image description used for retrieval."""
-    try:
-        vlm_description = " ".join(str(vlm_client.describe(image)).split())
-    except Exception as exc:
+    if vlm_client is None:
         vlm_description = fallback_image_description(image)
-        image["vlm_error"] = " ".join(str(exc).split())
-        logger.warning(
-            "VLM image description failed; using metadata fallback. "
-            "kind=%s page=%s path=%s sources=%s error=%s",
-            image.get("kind") or "image",
-            image.get("page_num") or "",
-            image.get("path") or "",
-            image.get("source_paths") or [],
-            exc,
-        )
+    else:
+        try:
+            vlm_description = " ".join(str(vlm_client.describe(image)).split())
+        except Exception as exc:
+            vlm_description = fallback_image_description(image)
+            image["vlm_error"] = " ".join(str(exc).split())
+            logger.warning(
+                "VLM image description failed; using metadata fallback. "
+                "kind=%s page=%s path=%s sources=%s error=%s",
+                image.get("kind") or "image",
+                image.get("page_num") or "",
+                image.get("path") or "",
+                image.get("source_paths") or [],
+                exc,
+            )
     image["vlm_description"] = vlm_description
     parts = [
         f"kind={image.get('kind') or 'image'}",
@@ -599,6 +653,8 @@ def image_description(image: dict[str, Any], vlm_client: Any) -> str:
     if bbox:
         parts.append(f"bbox={bbox}")
     parts.append(f"vlm={vlm_description}")
+    if image.get("vlm_skipped"):
+        parts.append(f"vlm_skipped={image.get('vlm_skipped')}")
     if image.get("vlm_error"):
         parts.append(f"vlm_error={image.get('vlm_error')}")
     return "[图片: " + "; ".join(parts) + "]"

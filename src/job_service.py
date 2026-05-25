@@ -75,6 +75,8 @@ def list_jobs(
             SELECT
                 j.*,
                 p.file_name,
+                p.parse_status AS paper_parse_status,
+                p.index_status AS paper_index_status,
                 u.username
             FROM jobs j
             LEFT JOIN papers p ON p.paper_id = j.paper_id
@@ -86,6 +88,248 @@ def list_jobs(
             parameters,
         ).fetchall()
     return [normalize_job_row(dict(row)) for row in rows]
+
+
+def queue_progress_summary(
+    user_id: int,
+    team_id: int,
+    job_types: tuple[str, ...] = ("parse", "index"),
+    queued_limit: int = 10,
+) -> dict[str, Any]:
+    """Return lightweight queue activity for the global UI progress bar."""
+    require_team_role(user_id, team_id, "viewer")
+    clean_types = tuple(normalize_job_type(job_type) for job_type in job_types)
+    placeholders = ", ".join("?" for _ in clean_types)
+    init_db()
+    with get_db_connection() as connection:
+        running_rows = connection.execute(
+            f"""
+            SELECT
+                j.*,
+                p.file_name,
+                p.parse_status AS paper_parse_status,
+                p.index_status AS paper_index_status,
+                u.username
+            FROM jobs j
+            LEFT JOIN papers p ON p.paper_id = j.paper_id
+            LEFT JOIN users u ON u.user_id = j.user_id
+            WHERE j.team_id = ?
+                AND j.job_type IN ({placeholders})
+                AND j.status = 'running'
+            ORDER BY COALESCE(j.started_at, j.locked_at, j.updated_at, j.created_at) ASC, j.job_id ASC
+            """,
+            [int(team_id), *clean_types],
+        ).fetchall()
+        queued_rows = connection.execute(
+            f"""
+            SELECT
+                j.*,
+                p.file_name,
+                u.username
+            FROM jobs j
+            LEFT JOIN papers p ON p.paper_id = j.paper_id
+            LEFT JOIN users u ON u.user_id = j.user_id
+            WHERE j.team_id = ?
+                AND j.job_type IN ({placeholders})
+                AND j.status = 'queued'
+            ORDER BY j.created_at ASC, j.job_id ASC
+            LIMIT ?
+            """,
+            [int(team_id), *clean_types, max(1, int(queued_limit))],
+        ).fetchall()
+        queued_candidate_rows = connection.execute(
+            f"""
+            SELECT
+                j.*,
+                p.file_name,
+                p.parse_status AS paper_parse_status,
+                p.index_status AS paper_index_status,
+                u.username
+            FROM jobs j
+            LEFT JOIN papers p ON p.paper_id = j.paper_id
+            LEFT JOIN users u ON u.user_id = j.user_id
+            WHERE j.team_id = ?
+                AND j.job_type IN ({placeholders})
+                AND j.status = 'queued'
+            ORDER BY j.created_at ASC, j.job_id ASC
+            LIMIT ?
+            """,
+            [int(team_id), *clean_types, max(100, int(queued_limit))],
+        ).fetchall()
+        count_rows = connection.execute(
+            f"""
+            SELECT status, COUNT(*) AS count
+            FROM jobs
+            WHERE team_id = ?
+                AND job_type IN ({placeholders})
+                AND status IN ('queued', 'running')
+            GROUP BY status
+            """,
+            [int(team_id), *clean_types],
+        ).fetchall()
+
+    running = [normalize_job_row(dict(row)) for row in running_rows]
+    queued = [normalize_job_row(dict(row)) for row in queued_rows]
+    queued_candidates = [normalize_job_row(dict(row)) for row in queued_candidate_rows]
+    counts = {str(row["status"]): int(row["count"]) for row in count_rows}
+    running_by_type: dict[str, dict[str, Any]] = {}
+    for job in running:
+        running_by_type.setdefault(str(job["job_type"]), job)
+    running_parse_index_papers = {
+        str(job.get("paper_id"))
+        for job in running
+        if job.get("paper_id") and str(job.get("job_type") or "") in {"parse", "index"}
+    }
+
+    def mark_queue_block_reason(job: dict[str, Any]) -> dict[str, Any]:
+        job_type = str(job.get("job_type") or "")
+        is_index_waiting_for_parse = (
+            job_type == "index"
+            and bool(job.get("paper_id"))
+            and (
+                str(job.get("paper_parse_status") or "") != "succeeded"
+                or str(job.get("paper_id")) in running_parse_index_papers
+            )
+        )
+        if is_index_waiting_for_parse:
+            job["queue_block_reason"] = "waiting_for_parse"
+        return job
+
+    queued = [mark_queue_block_reason(job) for job in queued]
+    queued_candidates = [mark_queue_block_reason(job) for job in queued_candidates]
+    queued_by_type: dict[str, dict[str, Any]] = {}
+    blocked_by_type: dict[str, dict[str, Any]] = {}
+    for job in queued_candidates:
+        job_type = str(job.get("job_type") or "")
+        if job.get("queue_block_reason"):
+            blocked_by_type.setdefault(job_type, job)
+        else:
+            queued_by_type.setdefault(job_type, job)
+    return {
+        "running": running,
+        "queued": queued,
+        "running_by_type": running_by_type,
+        "queued_by_type": queued_by_type,
+        "blocked_by_type": blocked_by_type,
+        "running_count": counts.get("running", 0),
+        "queued_count": counts.get("queued", 0),
+    }
+
+
+def clear_team_queued_jobs(
+    user_id: int,
+    team_id: int,
+    job_types: tuple[str, ...] | list[str] | None = None,
+    reason: str = "queue cleared by UI refresh",
+) -> dict[str, Any]:
+    """Cancel queued jobs for one team and restore paper statuses for manual scheduling."""
+    require_team_role(user_id, team_id, "editor")
+    clean_types = tuple(
+        dict.fromkeys(normalize_job_type(job_type) for job_type in (job_types or JOB_TYPES))
+    )
+    placeholders = ", ".join("?" for _ in clean_types)
+    parameters: list[Any] = [int(team_id), *clean_types]
+    init_db()
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT job_id, job_type, paper_id
+            FROM jobs
+            WHERE team_id = ?
+                AND job_type IN ({placeholders})
+                AND status = 'queued'
+            ORDER BY job_id ASC
+            """,
+            parameters,
+        ).fetchall()
+        jobs = [dict(row) for row in rows]
+        if not jobs:
+            return {"cleared_count": 0, "jobs": []}
+
+        job_ids = [int(job["job_id"]) for job in jobs]
+        id_placeholders = ", ".join("?" for _ in job_ids)
+        connection.execute(
+            f"""
+            UPDATE jobs
+            SET
+                status = 'canceled',
+                error_message = ?,
+                finished_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE job_id IN ({id_placeholders})
+                AND status = 'queued'
+            """,
+            [str(reason or "")[:4000], *job_ids],
+        )
+        restore_paper_statuses_after_queue_clear(connection, jobs)
+        return {"cleared_count": len(jobs), "jobs": [normalize_job_row(job) for job in jobs]}
+
+
+def restore_paper_statuses_after_queue_clear(connection: Any, jobs: list[dict[str, Any]]) -> None:
+    """Reset paper status fields after queued jobs are canceled."""
+    paper_ids_by_type: dict[str, list[str]] = {}
+    for job in jobs:
+        paper_id = str(job.get("paper_id") or "")
+        job_type = str(job.get("job_type") or "")
+        if not paper_id:
+            continue
+        paper_ids_by_type.setdefault(job_type, []).append(paper_id)
+
+    parse_paper_ids = paper_ids_by_type.get("parse") or []
+    if parse_paper_ids:
+        placeholders = ", ".join("?" for _ in parse_paper_ids)
+        connection.execute(
+            f"""
+            UPDATE papers
+            SET
+                parse_status = CASE
+                    WHEN COALESCE(markdown_path, '') != ''
+                        OR EXISTS (
+                            SELECT 1 FROM chunks c WHERE c.paper_id = papers.paper_id LIMIT 1
+                        )
+                    THEN 'succeeded'
+                    ELSE 'not_started'
+                END,
+                index_status = CASE
+                    WHEN index_status = 'queued' THEN 'unknown'
+                    ELSE index_status
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE paper_id IN ({placeholders})
+                AND parse_status = 'queued'
+            """,
+            parse_paper_ids,
+        )
+
+    index_paper_ids = paper_ids_by_type.get("index") or []
+    if index_paper_ids:
+        placeholders = ", ".join("?" for _ in index_paper_ids)
+        connection.execute(
+            f"""
+            UPDATE papers
+            SET
+                index_status = 'unknown',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE paper_id IN ({placeholders})
+                AND index_status = 'queued'
+            """,
+            index_paper_ids,
+        )
+
+    translate_paper_ids = paper_ids_by_type.get("translate") or []
+    if translate_paper_ids:
+        placeholders = ", ".join("?" for _ in translate_paper_ids)
+        connection.execute(
+            f"""
+            UPDATE papers
+            SET
+                translation_status = 'not_started',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE paper_id IN ({placeholders})
+                AND translation_status = 'queued'
+            """,
+            translate_paper_ids,
+        )
 
 
 def latest_job_for_paper(team_id: int, paper_id: str, job_type: str | None = None) -> dict[str, Any] | None:
@@ -110,21 +354,57 @@ def latest_job_for_paper(team_id: int, paper_id: str, job_type: str | None = Non
     return normalize_job_row(dict(row)) if row else None
 
 
-def claim_next_job() -> dict[str, Any] | None:
-    """Atomically claim the oldest queued job."""
+def claim_next_job(job_types: tuple[str, ...] | list[str] | None = None) -> dict[str, Any] | None:
+    """Atomically claim the oldest queued job, optionally constrained by type."""
+    clean_types = tuple(dict.fromkeys(normalize_job_type(job_type) for job_type in (job_types or ())))
+    where_clauses = [
+        "j.status = 'queued'",
+        "j.attempt_count < j.max_attempts",
+        """
+        NOT (
+            j.job_type IN ('parse', 'index')
+            AND j.paper_id IS NOT NULL
+            AND EXISTS (
+                SELECT 1
+                FROM jobs running
+                WHERE running.status = 'running'
+                    AND running.job_type IN ('parse', 'index')
+                    AND running.paper_id = j.paper_id
+            )
+        )
+        """,
+        """
+        (
+            j.job_type != 'index'
+            OR j.paper_id IS NULL
+            OR EXISTS (
+                SELECT 1
+                FROM papers p
+                WHERE p.paper_id = j.paper_id
+                    AND p.parse_status = 'succeeded'
+            )
+        )
+        """,
+    ]
+    parameters: list[Any] = []
+    if clean_types:
+        placeholders = ", ".join("?" for _ in clean_types)
+        where_clauses.append(f"j.job_type IN ({placeholders})")
+        parameters.extend(clean_types)
+
     init_db()
     connection = get_db_connection()
     try:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            """
-            SELECT *
-            FROM jobs
-            WHERE status = 'queued'
-                AND attempt_count < max_attempts
+            f"""
+            SELECT j.*
+            FROM jobs j
+            WHERE {' AND '.join(where_clauses)}
             ORDER BY created_at ASC, job_id ASC
             LIMIT 1
-            """
+            """,
+            parameters,
         ).fetchone()
         if not row:
             connection.commit()
@@ -154,6 +434,78 @@ def claim_next_job() -> dict[str, Any] | None:
         raise
     finally:
         connection.close()
+
+
+def requeue_running_jobs(job_types: tuple[str, ...] | list[str] | None = None) -> list[dict[str, Any]]:
+    """Requeue jobs left running by an interrupted worker process."""
+    clean_types = tuple(dict.fromkeys(normalize_job_type(job_type) for job_type in (job_types or ())))
+    where_clauses = ["status = 'running'", "attempt_count < max_attempts"]
+    parameters: list[Any] = []
+    if clean_types:
+        placeholders = ", ".join("?" for _ in clean_types)
+        where_clauses.append(f"job_type IN ({placeholders})")
+        parameters.extend(clean_types)
+
+    init_db()
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT job_id, job_type, paper_id
+            FROM jobs
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY COALESCE(locked_at, started_at, updated_at, created_at) ASC, job_id ASC
+            """,
+            parameters,
+        ).fetchall()
+        jobs = [dict(row) for row in rows]
+        if not jobs:
+            return []
+
+        job_ids = [int(job["job_id"]) for job in jobs]
+        id_placeholders = ", ".join("?" for _ in job_ids)
+        connection.execute(
+            f"""
+            UPDATE jobs
+            SET
+                status = 'queued',
+                locked_at = NULL,
+                started_at = NULL,
+                error_message = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE job_id IN ({id_placeholders})
+            """,
+            job_ids,
+        )
+        update_running_paper_statuses(connection, jobs)
+        return [normalize_job_row(job) for job in jobs]
+
+
+def update_running_paper_statuses(connection: Any, jobs: list[dict[str, Any]]) -> None:
+    """Mirror recovered running job status back to paper status columns."""
+    status_by_type = {
+        "parse": "parse_status",
+        "index": "index_status",
+        "translate": "translation_status",
+    }
+    for job_type, status_column in status_by_type.items():
+        paper_ids = [
+            str(job.get("paper_id"))
+            for job in jobs
+            if job.get("paper_id") and str(job.get("job_type")) == job_type
+        ]
+        if not paper_ids:
+            continue
+        placeholders = ", ".join("?" for _ in paper_ids)
+        connection.execute(
+            f"""
+            UPDATE papers
+            SET {status_column} = 'queued',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE paper_id IN ({placeholders})
+                AND {status_column} = 'running'
+            """,
+            paper_ids,
+        )
 
 
 def complete_job(job_id: int, result: dict[str, Any] | None = None) -> None:
