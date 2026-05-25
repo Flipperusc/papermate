@@ -14,7 +14,7 @@ import re
 import zipfile
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import quote, unquote
+from urllib.parse import unquote
 from uuid import uuid4
 
 import streamlit as st
@@ -101,7 +101,6 @@ BILINGUAL_ALIGNMENT_CACHE_VERSION = "header-image-notices-v2"
 QUEUE_REFRESH_SECONDS = 5
 QUEUE_HOVER_LIMIT = 10
 QUEUE_CANCEL_QUERY_PARAM = "pm_cancel_queue_job"
-INDEX_REFRESH_QUERY_PARAM = "pm_refresh_index"
 
 CARD_PALETTES = [
     {"top": "#eaf3ff", "accent": "#2563eb", "field": "#f6faff"},
@@ -1335,12 +1334,6 @@ def refresh_index_status_for_paper(paper_id: str, rerun: bool = True) -> None:
     if rerun:
         st.rerun()
 
-
-def index_refresh_href(paper_id: str) -> str:
-    """Return the compact Ask PaperMate refresh action URL."""
-    return f"?{INDEX_REFRESH_QUERY_PARAM}={quote(str(paper_id or ''))}"
-
-
 def local_index_state(paper_id: str, allow_db: bool = True) -> dict[str, str]:
     """Return UI-only index status without triggering remote embedding calls."""
     state_key = f"index_state_{paper_id}"
@@ -2343,40 +2336,6 @@ def handle_queue_cancel_query(user_id: int) -> None:
                 pass
         st.rerun()
 
-
-def handle_index_refresh_query(user_id: int) -> None:
-    """Handle compact Ask PaperMate index refresh links."""
-    try:
-        raw_paper_id = st.query_params.get(INDEX_REFRESH_QUERY_PARAM)
-    except Exception:
-        return
-    if isinstance(raw_paper_id, list):
-        raw_paper_id = raw_paper_id[0] if raw_paper_id else ""
-    paper_id = str(raw_paper_id or "").strip()
-    if not paper_id:
-        return
-
-    try:
-        refresh_index_status_for_paper(paper_id, rerun=False)
-    except Exception as exc:  # pragma: no cover - defensive UI guard
-        logger.warning(
-            "Index status refresh query failed. user_id=%s paper_id=%s error=%s",
-            user_id,
-            paper_id,
-            exc,
-        )
-        st.session_state["pm_workspace_notice"] = f"刷新索引状态失败：{exc}"
-    finally:
-        try:
-            del st.query_params[INDEX_REFRESH_QUERY_PARAM]
-        except Exception:
-            try:
-                st.query_params.clear()
-            except Exception:
-                pass
-        st.rerun()
-
-
 def render_app_shell() -> None:
     """Render a lightweight marker for the shared app shell."""
     st.markdown('<div class="pm-app-shell"></div>', unsafe_allow_html=True)
@@ -2878,25 +2837,28 @@ def render_qa_box(paper_id: str) -> None:
     index_state = local_index_state(paper_id)
     index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
     index_busy = index_state["vector"] in {"排队中", "构建中"} or index_state["bm25"] in {"排队中", "构建中"}
-    st.markdown(
-        f"""
-        <div class="pm-ask-card">
-          <div class="pm-section-heading">
-            <div>
-              <h3 class="pm-section-title">Ask PaperMate</h3>
-            </div>
-            <div class="pm-ask-heading-actions">
-              <a class="pm-small-refresh" href="{index_refresh_href(paper_id)}" title="刷新索引状态">刷新</a>
-              <div class="pm-badges">
-                {render_status_badge(f"向量 {index_state['vector']}", index_status_type(index_state['vector']))}
-                {render_status_badge(f"BM25 {index_state['bm25']}", index_status_type(index_state['bm25']))}
-              </div>
-            </div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    header_cols = st.columns([0.48, 0.16, 0.36], gap="small", vertical_alignment="center")
+    with header_cols[0]:
+        st.markdown('<h3 class="pm-section-title">Ask PaperMate</h3>', unsafe_allow_html=True)
+    with header_cols[1]:
+        if st.button("刷新", key=f"qa_refresh_index_state_{paper_id}", help="刷新索引状态", use_container_width=True):
+            refresh_index_status_for_paper(paper_id, rerun=False)
+            index_state = local_index_state(paper_id)
+            index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
+            index_busy = index_state["vector"] in {"排队中", "构建中"} or index_state["bm25"] in {"排队中", "构建中"}
+    with header_cols[2]:
+        vector_badge = render_status_badge(
+            f"向量 {index_state['vector']}",
+            index_status_type(index_state["vector"]),
+        )
+        bm25_badge = render_status_badge(
+            f"BM25 {index_state['bm25']}",
+            index_status_type(index_state["bm25"]),
+        )
+        st.markdown(
+            f'<div class="pm-badges pm-ask-badges-inline">{vector_badge}{bm25_badge}</div>',
+            unsafe_allow_html=True,
+        )
 
     if not index_ready:
         render_empty_state(
@@ -3808,34 +3770,8 @@ def inject_global_css() -> None:
           justify-content: space-between;
           gap: 12px;
         }
-        .pm-ask-heading-actions {
-          display: flex;
-          align-items: center;
+        .pm-ask-badges-inline {
           justify-content: flex-end;
-          gap: 8px;
-          flex-wrap: wrap;
-        }
-        .pm-small-refresh {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          min-height: 26px;
-          padding: 0 9px;
-          border: 1px solid rgba(99,102,241,.24);
-          border-radius: 8px;
-          background: #F8FAFF;
-          color: #3730A3;
-          font-size: 12px;
-          font-weight: 850;
-          line-height: 1;
-          text-decoration: none;
-          white-space: nowrap;
-        }
-        .pm-small-refresh:hover {
-          background: #EEF2FF;
-          border-color: rgba(79,70,229,.4);
-          color: #312E81;
-          text-decoration: none;
         }
         .pm-section-title {
           margin: 0;
@@ -6269,7 +6205,6 @@ def render_app() -> None:
         return
 
     handle_queue_cancel_query(int(user["user_id"]))
-    handle_index_refresh_query(int(user["user_id"]))
     prepare_user_workspace_once(int(user["user_id"]))
     page = render_sidebar_navigation(user)
     team_context = current_team_context()
