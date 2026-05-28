@@ -29,7 +29,18 @@ REQUIRED_COLUMNS = {
     "bad_cases": {"user_id", "team_id", "project_id"},
     "literature_cards": {"team_id", "project_id"},
     "card_libraries": {"team_id", "visibility"},
-    "jobs": {"job_type", "status", "payload_json", "result_json", "attempt_count"},
+    "jobs": {
+        "job_type",
+        "status",
+        "payload_json",
+        "result_json",
+        "attempt_count",
+        "worker_id",
+        "heartbeat_at",
+        "lease_expires_at",
+        "next_run_at",
+        "last_error_code",
+    },
 }
 
 

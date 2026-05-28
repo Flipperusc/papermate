@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 import time
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,11 +21,14 @@ from src.card_pipeline import generate_literature_card
 from src.chunker import chunk_pages
 from src.db import get_db_connection, init_db, save_paper_and_chunks
 from src.job_service import (
-    claim_next_job,
+    DEFAULT_JOB_LEASE_SECONDS,
+    claim_next_job_for_worker,
     complete_job,
     enqueue_job,
     fail_job,
+    heartbeat_job,
     latest_job_for_paper,
+    requeue_expired_jobs,
     requeue_running_jobs,
 )
 from src.literature_card_service import save_literature_card
@@ -39,6 +44,7 @@ DEFAULT_WORKER_LANES: tuple[tuple[str, ...], ...] = (
     ("index",),
     ("translate", "card", "eval"),
 )
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
 def run_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -310,14 +316,18 @@ def worker_lane_label(job_types: tuple[str, ...]) -> str:
     return ",".join(job_types)
 
 
-def run_worker_lane(job_types: tuple[str, ...], poll_interval: float) -> None:
+def run_worker_lane(job_types: tuple[str, ...], poll_interval: float, lease_seconds: int) -> None:
     """Run one named worker lane forever."""
     label = worker_lane_label(job_types)
     print(f"Worker lane started: {label}", flush=True)
-    run_worker(poll_interval=poll_interval, job_types=job_types)
+    run_worker(poll_interval=poll_interval, job_types=job_types, lease_seconds=lease_seconds)
 
 
-def run_worker_lanes(poll_interval: float = 3.0, recover_running: bool = False) -> int:
+def run_worker_lanes(
+    poll_interval: float = 3.0,
+    recover_running: bool = False,
+    lease_seconds: int = DEFAULT_JOB_LEASE_SECONDS,
+) -> int:
     """Run default parse/index/other lanes concurrently."""
     if recover_running:
         report_recovered_jobs(requeue_running_jobs())
@@ -325,7 +335,7 @@ def run_worker_lanes(poll_interval: float = 3.0, recover_running: bool = False) 
     for job_types in DEFAULT_WORKER_LANES:
         thread = threading.Thread(
             target=run_worker_lane,
-            args=(job_types, poll_interval),
+            args=(job_types, poll_interval, lease_seconds),
             name=f"papermate-worker-{worker_lane_label(job_types)}",
             daemon=True,
         )
@@ -346,14 +356,21 @@ def run_worker(
     limit: int | None = None,
     job_types: tuple[str, ...] | None = None,
     recover_running: bool = False,
+    lease_seconds: int = DEFAULT_JOB_LEASE_SECONDS,
 ) -> int:
     """Run jobs until stopped, or once when requested."""
     init_db()
+    worker_id = build_worker_id(job_types)
     if recover_running:
         report_recovered_jobs(requeue_running_jobs(job_types=job_types))
     completed = 0
     while True:
-        job = claim_next_job(job_types=job_types)
+        requeue_expired_jobs(job_types=job_types)
+        job = claim_next_job_for_worker(
+            job_types=job_types,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+        )
         if not job:
             if once:
                 return completed
@@ -361,17 +378,22 @@ def run_worker(
             continue
 
         try:
-            result = run_job(job)
+            result = run_job_with_heartbeat(job, worker_id=worker_id, lease_seconds=lease_seconds)
         except Exception as exc:
+            will_retry = job_has_remaining_attempts(job)
             if job.get("paper_id") and job.get("job_type") == "parse":
-                update_paper_status(str(job["paper_id"]), parse_status="failed", index_status="failed")
-                fail_pending_index_jobs(str(job["paper_id"]), f"parse failed before indexing: {exc}")
+                if will_retry:
+                    update_paper_status(str(job["paper_id"]), parse_status="queued", index_status="queued")
+                else:
+                    update_paper_status(str(job["paper_id"]), parse_status="failed", index_status="failed")
+                    fail_pending_index_jobs(str(job["paper_id"]), f"parse failed before indexing: {exc}")
             elif job.get("paper_id") and job.get("job_type") == "index":
-                update_paper_status(str(job["paper_id"]), index_status="failed")
+                update_paper_status(str(job["paper_id"]), index_status="queued" if will_retry else "failed")
             elif job.get("paper_id") and job.get("job_type") == "translate":
-                update_paper_status(str(job["paper_id"]), translation_status="failed")
-            fail_job(int(job["job_id"]), str(exc))
-            print(f"FAILED #{job['job_id']} {job['job_type']}: {exc}", flush=True)
+                update_paper_status(str(job["paper_id"]), translation_status="queued" if will_retry else "failed")
+            fail_job(int(job["job_id"]), str(exc), auto_retry=True)
+            outcome = "RETRY" if will_retry else "FAILED"
+            print(f"{outcome} #{job['job_id']} {job['job_type']}: {exc}", flush=True)
         else:
             complete_job(int(job["job_id"]), result)
             print(f"DONE #{job['job_id']} {job['job_type']}: {result}", flush=True)
@@ -386,6 +408,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="process at most one queued job and exit")
     parser.add_argument("--limit", type=int, default=None, help="process at most N jobs and exit")
     parser.add_argument("--poll-interval", type=float, default=3.0, help="seconds between polls")
+    parser.add_argument(
+        "--lease-seconds",
+        type=int,
+        default=DEFAULT_JOB_LEASE_SECONDS,
+        help="seconds a claimed job lease remains valid without heartbeat",
+    )
     parser.add_argument(
         "--serial",
         action="store_true",
@@ -426,12 +454,72 @@ def main() -> int:
                 limit=args.limit,
                 job_types=job_types,
                 recover_running=args.recover_running,
+                lease_seconds=args.lease_seconds,
             )
         else:
-            run_worker_lanes(poll_interval=args.poll_interval, recover_running=args.recover_running)
+            run_worker_lanes(
+                poll_interval=args.poll_interval,
+                recover_running=args.recover_running,
+                lease_seconds=args.lease_seconds,
+            )
     except KeyboardInterrupt:
         print("Worker stopped by user.", flush=True)
     return 0
+
+
+def run_job_with_heartbeat(
+    job: dict[str, Any],
+    *,
+    worker_id: str,
+    lease_seconds: int,
+) -> dict[str, Any]:
+    """Run one job while periodically extending its worker lease."""
+    stop_event = threading.Event()
+    heartbeat_interval = heartbeat_interval_for_lease(lease_seconds)
+    thread = threading.Thread(
+        target=heartbeat_loop,
+        args=(int(job["job_id"]), worker_id, lease_seconds, heartbeat_interval, stop_event),
+        name=f"papermate-heartbeat-{job['job_id']}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        return run_job(job)
+    finally:
+        stop_event.set()
+        thread.join(timeout=1.0)
+
+
+def heartbeat_loop(
+    job_id: int,
+    worker_id: str,
+    lease_seconds: int,
+    heartbeat_interval: float,
+    stop_event: threading.Event,
+) -> None:
+    """Keep a running job lease alive until the job finishes."""
+    while not stop_event.wait(max(1.0, heartbeat_interval)):
+        if not heartbeat_job(job_id, worker_id=worker_id, lease_seconds=lease_seconds):
+            return
+
+
+def heartbeat_interval_for_lease(lease_seconds: int) -> float:
+    """Use a heartbeat interval safely below the lease duration."""
+    lease = max(10, int(lease_seconds or DEFAULT_JOB_LEASE_SECONDS))
+    return min(DEFAULT_HEARTBEAT_INTERVAL_SECONDS, max(5.0, lease / 3.0))
+
+
+def build_worker_id(job_types: tuple[str, ...] | None) -> str:
+    """Build a readable worker id for jobs claimed by this process/thread."""
+    lane = worker_lane_label(job_types or ("all",))
+    return f"{os.getpid()}:{threading.current_thread().name}:{lane}:{uuid4().hex[:8]}"
+
+
+def job_has_remaining_attempts(job: dict[str, Any]) -> bool:
+    """Return whether the just-failed attempt should be retried."""
+    attempt_count = int(job.get("attempt_count") or 0)
+    max_attempts = int(job.get("max_attempts") or 1)
+    return attempt_count < max_attempts
 
 
 if __name__ == "__main__":

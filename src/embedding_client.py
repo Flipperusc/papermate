@@ -10,6 +10,7 @@ import requests
 
 from config import settings
 from src.errors import EmbeddingError, ErrorCode
+from src.external_call import RETRYABLE_STATUS_CODES, RetryPolicy, call_with_retries
 from src.logger import get_logger
 
 
@@ -33,6 +34,7 @@ class EmbeddingClient:
         batch_size: int = 64,
         dimensions: int | None = None,
         session: requests.Session | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.provider = normalize_provider(provider or settings.embedding_provider)
         self.model = model or settings.embedding_model
@@ -42,6 +44,11 @@ class EmbeddingClient:
         self.batch_size = max(1, batch_size)
         self.dimensions = dimensions if dimensions is not None else settings.embedding_dimensions
         self.session = session or requests.Session()
+        self.retry_policy = retry_policy or RetryPolicy(
+            max_attempts=settings.external_api_max_attempts,
+            base_delay_seconds=settings.external_api_retry_base_seconds,
+            max_delay_seconds=settings.external_api_retry_max_seconds,
+        )
 
     def _create_openai_client(self):
         """Create an OpenAI SDK client configured for compatible APIs."""
@@ -89,9 +96,14 @@ class EmbeddingClient:
 
         try:
             for batch in batched(texts, self.batch_size):
-                response = client.embeddings.create(
-                    model=self.model,
-                    input=[text or "" for text in batch],
+                response = call_with_retries(
+                    lambda batch=batch: client.embeddings.create(
+                        model=self.model,
+                        input=[text or "" for text in batch],
+                    ),
+                    operation_name="OpenAI-compatible embedding batch",
+                    logger=logger,
+                    policy=self.retry_policy,
                 )
                 response_data = sorted(response.data, key=lambda item: item.index)
                 embeddings.extend([list(item.embedding) for item in response_data])
@@ -134,14 +146,12 @@ class EmbeddingClient:
                 if self.dimensions > 0:
                     payload["dimensions"] = self.dimensions
 
-                response = self.session.post(
-                    zhipu_embeddings_url(self.base_url),
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                    timeout=120,
+                response = call_with_retries(
+                    lambda payload=payload: self._post_zhipu_embeddings(payload),
+                    operation_name="Zhipu embedding batch",
+                    logger=logger,
+                    policy=self.retry_policy,
+                    retry_exceptions=(requests.RequestException,),
                 )
                 if response.status_code >= 400:
                     logger.error(
@@ -188,6 +198,21 @@ class EmbeddingClient:
             )
 
         return embeddings
+
+    def _post_zhipu_embeddings(self, payload: dict[str, Any]) -> requests.Response:
+        """Send one Zhipu embedding request and raise on retryable HTTP statuses."""
+        response = self.session.post(
+            zhipu_embeddings_url(self.base_url),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=120,
+        )
+        if response.status_code in RETRYABLE_STATUS_CODES:
+            response.raise_for_status()
+        return response
 
     def _normalize_base_url(self, base_url: str) -> str:
         if self.provider in ZHIPU_PROVIDERS:

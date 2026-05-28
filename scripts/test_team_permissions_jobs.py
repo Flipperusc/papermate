@@ -20,11 +20,15 @@ from src.job_service import (
     cancel_queued_job,
     clear_team_queued_jobs,
     claim_next_job,
+    claim_next_job_for_worker,
     complete_job,
     enqueue_job,
+    fail_job,
     get_job,
+    heartbeat_job,
     list_jobs,
     queue_progress_summary,
+    requeue_expired_jobs,
     requeue_running_jobs,
     retry_job,
 )
@@ -41,6 +45,7 @@ from src.team_service import (
 def main() -> None:
     test_init_db_cached_wal()
     test_claim_next_job_type_lanes_and_paper_mutex()
+    test_job_lease_heartbeat_expiry_and_retry()
     test_requeue_running_jobs_restores_paper_status()
     test_clear_team_queued_jobs_restores_manual_status()
     test_cancel_queued_job_restores_manual_status()
@@ -283,6 +288,77 @@ def test_requeue_running_jobs_restores_paper_status() -> None:
                 ).fetchone()
             assert paper["parse_status"] == "queued"
             assert paper["index_status"] == "queued"
+        finally:
+            object.__setattr__(db_module.settings, "db_path", original_db_path)
+
+
+def test_job_lease_heartbeat_expiry_and_retry() -> None:
+    """Verify worker leases, heartbeats, expired recovery, and automatic retry scheduling."""
+    original_db_path = db_module.settings.db_path
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        temp_db_path = Path(tmp_dir) / "papermate-lease-test.db"
+        object.__setattr__(db_module.settings, "db_path", temp_db_path)
+        try:
+            init_db(force=True)
+            suffix = uuid4().hex[:10]
+            owner = create_user(f"pm_lease_owner_{suffix}", "password123")
+            workspace = ensure_user_workspace(int(owner["user_id"]))
+            team_id = int(workspace["team_id"])
+            project_id = int(workspace["project_id"])
+            paper_id = f"paper-lease-{suffix}"
+            insert_test_paper(paper_id, int(owner["user_id"]), team_id, project_id)
+            job_id = enqueue_job(
+                "parse",
+                user_id=int(owner["user_id"]),
+                team_id=team_id,
+                project_id=project_id,
+                paper_id=paper_id,
+                payload={"paper_id": paper_id},
+                max_attempts=3,
+            )
+
+            claimed = claim_next_job_for_worker(
+                job_types=("parse",),
+                worker_id="worker-a",
+                lease_seconds=60,
+            )
+            assert claimed is not None
+            assert int(claimed["job_id"]) == job_id
+            assert claimed["worker_id"] == "worker-a"
+            assert claimed["heartbeat_at"]
+            assert claimed["lease_expires_at"]
+            assert heartbeat_job(job_id, worker_id="worker-a", lease_seconds=120) is True
+            assert heartbeat_job(job_id, worker_id="worker-b", lease_seconds=120) is False
+
+            with get_db_connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET lease_expires_at = datetime(CURRENT_TIMESTAMP, '-1 seconds')
+                    WHERE job_id = ?
+                    """,
+                    (job_id,),
+                )
+            recovered = requeue_expired_jobs(job_types=("parse",))
+            assert {int(job["job_id"]) for job in recovered} == {job_id}
+            recovered_job = get_job(job_id)
+            assert recovered_job["status"] == "queued"
+            assert recovered_job["worker_id"] is None
+            assert recovered_job["lease_expires_at"] is None
+
+            claimed_again = claim_next_job_for_worker(
+                job_types=("parse",),
+                worker_id="worker-c",
+                lease_seconds=60,
+            )
+            assert claimed_again is not None
+            assert int(claimed_again["attempt_count"]) == 2
+            fail_job(job_id, "transient failure", auto_retry=True, retry_delay_seconds=45, error_code="TRANSIENT")
+            retry_job_record = get_job(job_id)
+            assert retry_job_record["status"] == "queued"
+            assert retry_job_record["next_run_at"]
+            assert retry_job_record["last_error_code"] == "TRANSIENT"
+            assert claim_next_job(job_types=("parse",)) is None
         finally:
             object.__setattr__(db_module.settings, "db_path", original_db_path)
 

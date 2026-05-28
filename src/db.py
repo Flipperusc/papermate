@@ -263,7 +263,12 @@ def init_db(db_path: str | Path | None = None, force: bool = False) -> None:
                 error_message TEXT NOT NULL DEFAULT '',
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 max_attempts INTEGER NOT NULL DEFAULT 3,
+                worker_id TEXT,
                 locked_at TEXT,
+                heartbeat_at TEXT,
+                lease_expires_at TEXT,
+                next_run_at TEXT,
+                last_error_code TEXT NOT NULL DEFAULT '',
                 started_at TEXT,
                 finished_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -384,6 +389,17 @@ def ensure_schema_migrations(connection: sqlite3.Connection) -> None:
             "updated_at": "TEXT",
         },
     )
+    ensure_columns(
+        connection,
+        "jobs",
+        {
+            "worker_id": "TEXT",
+            "heartbeat_at": "TEXT",
+            "lease_expires_at": "TEXT",
+            "next_run_at": "TEXT",
+            "last_error_code": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_card_libraries_user_id
@@ -424,6 +440,18 @@ def ensure_schema_migrations(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_jobs_status_created
             ON jobs (status, created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_jobs_type_status_next_run
+            ON jobs (job_type, status, next_run_at, created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_jobs_running_lease
+            ON jobs (status, lease_expires_at)
         """
     )
     migrate_legacy_team_scope(connection)

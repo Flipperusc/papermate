@@ -15,18 +15,17 @@ import zipfile
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import unquote
-from uuid import uuid4
 
 import streamlit as st
 import streamlit.components.v1 as components
 
 from config import settings
 from src import __version__
+from src.application import paper_workflow, study_workflow
 from src.auth_service import authenticate_user, create_user, get_user_by_id
 from src.bilingual_aligner import align_markdown_bilingual
-from src.card_pipeline import generate_literature_card
-from src.chunker import CHUNKER_VERSION, chunk_pages
-from src.db import ensure_data_directories, init_db, save_paper_and_chunks, save_qa_log
+from src.chunker import CHUNKER_VERSION
+from src.db import init_db
 from src.errors import (
     AppError,
     EmbeddingError,
@@ -42,7 +41,6 @@ from src.job_service import (
     cancel_job,
     cancel_queued_job,
     clear_team_queued_jobs,
-    enqueue_job,
     latest_job_for_paper,
     list_jobs,
     queue_progress_summary,
@@ -60,24 +58,18 @@ from src.literature_card_service import (
     get_literature_card_by_paper,
     list_card_libraries,
     list_literature_cards,
-    save_literature_card,
     update_card_library,
     update_literature_card,
 )
 from src.logger import get_logger
-from src.markdown_translator import translate_markdown_to_chinese
 from src.paper_service import (
     chunks_to_markdown,
     delete_team_papers,
-    file_sha256,
-    find_team_paper_by_hash,
     get_accessible_paper,
     list_accessible_papers,
     paper_to_processed_pdf,
     update_paper_status,
 )
-from src.pdf_parser import parse_pdf
-from src.rag_pipeline import answer_question
 from src.retrieval.bm25_store import BM25Store
 from src.team_service import (
     TEAM_ROLES,
@@ -600,43 +592,6 @@ def format_file_size(size_bytes: int) -> str:
     if size_bytes < 1024 * 1024:
         return f"{size_bytes / 1024:.1f} KB"
     return f"{size_bytes / (1024 * 1024):.1f} MB"
-
-
-def save_uploaded_pdf(uploaded_file: UploadedFile) -> dict[str, Any]:
-    """Validate and save an uploaded PDF file."""
-    original_name = Path(uploaded_file.name).name
-    if Path(original_name).suffix.lower() != ".pdf":
-        raise UploadError(ErrorCode.INVALID_FILE_TYPE)
-
-    file_bytes = uploaded_file.getvalue()
-    if not file_bytes:
-        raise UploadError(ErrorCode.EMPTY_FILE)
-
-    paper_id = uuid4().hex
-    digest = file_sha256(file_bytes)
-
-    try:
-        upload_dir, _ = ensure_data_directories()
-        save_path = upload_dir / f"{paper_id}_{original_name}"
-        save_path.write_bytes(file_bytes)
-    except OSError as exc:
-        raise UploadError(ErrorCode.SAVE_FAILED, detail=str(exc)) from exc
-
-    return {
-        "file_name": original_name,
-        "paper_id": paper_id,
-        "file_size_bytes": len(file_bytes),
-        "file_size": format_file_size(len(file_bytes)),
-        "save_path": str(save_path.resolve()),
-        "file_sha256": digest,
-    }
-
-
-def build_text_preview(parsed_pdf: dict[str, Any], limit: int = 1000) -> tuple[int, str]:
-    """Build total character count and preview from parsed pages."""
-    pages = parsed_pdf["pages"]
-    full_text = "\n\n".join(page["text"] for page in pages)
-    return len(full_text), full_text[:limit]
 
 
 def normalize_markdown_image_ref(value: str) -> str:
@@ -1398,72 +1353,6 @@ def get_uploaded_file_signature(uploaded_file: UploadedFile) -> str:
     return f"{uploaded_file.name}:{len(file_bytes)}:{digest}:{parse_settings}"
 
 
-def process_uploaded_pdf(
-    uploaded_file: UploadedFile,
-    user_id: int | None = None,
-    team_id: int | None = None,
-    project_id: int | None = None,
-) -> dict[str, Any]:
-    """Save, parse, chunk, and persist an uploaded PDF once per session file."""
-    signature = get_uploaded_file_signature(uploaded_file)
-    cached_result = st.session_state.get("processed_pdf")
-    # MinerU parsing can be slow and billable; include parser settings in the
-    # signature so a changed configuration forces a fresh parse.
-    if cached_result and cached_result.get("signature") == signature:
-        return cached_result
-
-    saved_file = save_uploaded_pdf(uploaded_file)
-    parsed_pdf = parse_pdf(saved_file["save_path"], saved_file["paper_id"])
-    chunks = chunk_pages(
-        saved_file["paper_id"],
-        parsed_pdf["pages"],
-        chunk_size=settings.rag_chunk_size,
-        overlap=settings.rag_chunk_overlap,
-        elements=parsed_pdf.get("elements"),
-    )
-    total_chars, preview = build_text_preview(parsed_pdf)
-
-    db_save_failed = False
-    try:
-        # The UI can still show the parsed Markdown if SQLite fails, but RAG and
-        # literature cards need these persisted chunks for later page actions.
-        save_paper_and_chunks(
-            {
-                "paper_id": saved_file["paper_id"],
-                "file_name": saved_file["file_name"],
-                "file_size_bytes": saved_file["file_size_bytes"],
-                "save_path": saved_file["save_path"],
-                "owner_user_id": user_id,
-                "team_id": team_id,
-                "project_id": project_id,
-                "file_sha256": saved_file.get("file_sha256", ""),
-                "parse_status": "succeeded",
-                "parser": parsed_pdf.get("parser", ""),
-                "markdown_path": parsed_pdf.get("markdown_path"),
-                "translated_markdown_path": parsed_pdf.get("translated_markdown_path"),
-                "content_list_path": parsed_pdf.get("content_list_path"),
-                "images": parsed_pdf.get("images", []),
-                "page_count": parsed_pdf["page_count"],
-                "total_chars": total_chars,
-            },
-            chunks,
-        )
-    except (OSError, sqlite3.Error):
-        db_save_failed = True
-
-    result = {
-        "signature": signature,
-        "saved_file": saved_file,
-        "parsed_pdf": parsed_pdf,
-        "chunks": chunks,
-        "total_chars": total_chars,
-        "preview": preview,
-        "db_save_failed": db_save_failed,
-    }
-    st.session_state["processed_pdf"] = result
-    return result
-
-
 def index_state_from_paper_status(
     index_status: str,
     vector_status: str = "未知",
@@ -2117,33 +2006,15 @@ def enqueue_index_build_for_paper(
     payload_extra: dict[str, Any] | None = None,
 ) -> tuple[int, bool]:
     """Queue an index build for one paper and return (job_id, reused_existing)."""
-    paper = get_accessible_paper(paper_id, current_user_id(), minimum_role="editor")
-    if not paper:
-        raise PermissionError("没有找到当前论文或无权构建索引。")
-    parse_status = str(paper.get("parse_status") or "")
-    if require_parsed and parse_status != "succeeded":
-        raise ValueError("这篇论文还没有解析完成，暂时不能构建索引。")
-
-    latest_job = latest_job_for_paper(int(paper["team_id"]), paper_id, "index")
-    if latest_job and latest_job.get("status") in {"queued", "running"}:
-        update_paper_status(paper_id, index_status=str(latest_job["status"]))
-        state_label = "构建中" if latest_job.get("status") == "running" else "排队中"
-        st.session_state[f"index_state_{paper_id}"] = {"vector": state_label, "bm25": state_label}
-        return int(latest_job["job_id"]), True
-
-    payload = {"paper_id": paper_id}
-    payload.update(payload_extra or {})
-    job_id = enqueue_job(
-        "index",
+    result = paper_workflow.queue_index_build_for_paper(
+        paper_id,
         user_id=current_user_id(),
-        team_id=int(paper["team_id"]),
-        project_id=paper.get("project_id"),
-        paper_id=paper_id,
-        payload=payload,
+        require_parsed=require_parsed,
+        payload_extra=payload_extra,
     )
-    update_paper_status(paper_id, index_status="queued")
-    st.session_state[f"index_state_{paper_id}"] = {"vector": "排队中", "bm25": "排队中"}
-    return job_id, False
+    state_label = result.get("state_label") or "排队中"
+    st.session_state[f"index_state_{paper_id}"] = {"vector": state_label, "bm25": state_label}
+    return int(result["job_id"]), bool(result["reused_existing"])
 
 
 def enqueue_upload_processing_pipeline(
@@ -2152,74 +2023,17 @@ def enqueue_upload_processing_pipeline(
     include_images: bool = False,
 ) -> dict[str, Any]:
     """Queue parse and index jobs for an uploaded paper, reusing active jobs."""
+    pipeline = paper_workflow.queue_upload_processing_pipeline(
+        paper,
+        user_id=current_user_id(),
+        include_images=include_images,
+    )
     paper_id = str(paper.get("paper_id") or "")
-    team_id = int(paper.get("team_id") or 0)
-    if not paper_id or team_id <= 0:
-        raise ValueError("paper metadata is missing paper_id or team_id")
-
-    active_statuses = {"queued", "running"}
-    parse_status = str(paper.get("parse_status") or "").strip().lower()
-    index_status = str(paper.get("index_status") or "").strip().lower()
-
-    latest_parse_job = latest_job_for_paper(team_id, paper_id, "parse")
-    latest_parse_status = str((latest_parse_job or {}).get("status") or "").strip().lower()
-    parse_job_id: int | None = None
-    parse_reused = False
-
-    parse_needed = parse_status != "succeeded" or latest_parse_status in active_statuses
-    if latest_parse_status in active_statuses:
-        parse_job_id = int(latest_parse_job["job_id"])
-        parse_reused = True
-        update_paper_status(paper_id, parse_status=latest_parse_status)
-    elif parse_needed:
-        update_paper_status(paper_id, parse_status="queued", index_status="queued")
-        parse_job_id = enqueue_job(
-            "parse",
-            user_id=current_user_id(),
-            team_id=team_id,
-            project_id=paper.get("project_id"),
-            paper_id=paper_id,
-            payload={
-                "paper_id": paper_id,
-                "save_path": paper.get("save_path"),
-                "auto_created_from_upload": True,
-                "auto_index": False,
-                "include_images": bool(include_images),
-            },
-        )
-
-    latest_index_job = latest_job_for_paper(team_id, paper_id, "index")
-    latest_index_status = str((latest_index_job or {}).get("status") or "").strip().lower()
-    index_job_id: int | None = None
-    index_reused = False
-    should_queue_index = parse_needed or index_status != "succeeded"
-
-    if latest_index_status in active_statuses:
-        index_job_id = int(latest_index_job["job_id"])
-        index_reused = True
-        update_paper_status(paper_id, index_status=latest_index_status)
-    elif should_queue_index:
-        index_job_id = enqueue_job(
-            "index",
-            user_id=current_user_id(),
-            team_id=team_id,
-            project_id=paper.get("project_id"),
-            paper_id=paper_id,
-            payload={
-                "paper_id": paper_id,
-                "auto_created_from_upload": True,
-                "waiting_for_parse": parse_status != "succeeded" or parse_job_id is not None,
-            },
-        )
-        update_paper_status(paper_id, index_status="queued")
-        st.session_state[f"index_state_{paper_id}"] = {"vector": "排队中", "bm25": "排队中"}
-
-    return {
-        "parse_job_id": parse_job_id,
-        "index_job_id": index_job_id,
-        "parse_reused": parse_reused,
-        "index_reused": index_reused,
-    }
+    index_status = str(pipeline.get("index_job_status") or "")
+    if paper_id and pipeline.get("index_job_id") and index_status in {"queued", "running"}:
+        state_label = paper_workflow.index_state_label(index_status)
+        st.session_state[f"index_state_{paper_id}"] = {"vector": state_label, "bm25": state_label}
+    return pipeline
 
 
 def upload_processing_message(reused: bool, pipeline: dict[str, Any]) -> str:
@@ -3102,7 +2916,11 @@ def render_qa_box(paper_id: str) -> None:
             return
         try:
             with st.spinner("正在检索论文片段并生成回答..."):
-                rag_result = answer_question(paper_id, question, user_id=current_user_id())
+                rag_result = study_workflow.answer_paper_question(
+                    paper_id,
+                    question,
+                    user_id=current_user_id(),
+                )
         except AppError as exc:
             logger.exception("RAG question answering failed. paper_id=%s", paper_id)
             if exc.code in {ErrorCode.VECTOR_SEARCH_FAILED, ErrorCode.BM25_INDEX_MISSING}:
@@ -3115,23 +2933,10 @@ def render_qa_box(paper_id: str) -> None:
             render_error_card("问答失败", "请查看日志或检查模型与索引配置。", str(exc))
             return
 
-        qa_log_id = rag_result.get("qa_id")
-        if qa_log_id is None:
-            try:
-                qa_log_id = save_qa_log(paper_id, question.strip(), rag_result["answer"], user_id=current_user_id())
-            except (OSError, sqlite3.Error):
-                logger.exception("QA log save failed. paper_id=%s", paper_id)
-                st.warning("问答记录保存失败，但不影响当前回答。")
-
-        st.session_state[f"last_qa_{paper_id}"] = {
-            "paper_id": paper_id,
-            "question": question.strip(),
-            "answer": rag_result["answer"],
-            "citations": rag_result["citations"],
-            "source_chunks": rag_result["source_chunks"],
-            "retrieval_details": rag_result.get("retrieval_details") or rag_result.get("retrieval_debug", {}),
-            "qa_log_id": qa_log_id,
-        }
+        if rag_result.get("qa_log_save_failed"):
+            logger.warning("QA log save failed after RAG answer. paper_id=%s", paper_id)
+            st.warning("问答记录保存失败，但不影响当前回答。")
+        st.session_state[f"last_qa_{paper_id}"] = rag_result["qa_record"]
 
     qa_record = st.session_state.get(f"last_qa_{paper_id}")
     if qa_record:
@@ -3201,13 +3006,10 @@ def render_literature_card_save(
     generated_key = f"generated_card_markdown_{paper_id}"
     if st.button("生成文献卡片", type="primary", use_container_width=True, key=f"generate_card_{paper_id}"):
         try:
-            job_id = enqueue_job(
-                "card",
+            job_id = study_workflow.queue_literature_card_generation(
+                paper_id,
                 user_id=user_id,
-                team_id=int(team_context["team_id"]),
-                project_id=team_context.get("project_id"),
-                paper_id=paper_id,
-                payload={"paper_id": paper_id, "library_id": int(selected_library_id)},
+                library_id=int(selected_library_id),
             )
             st.success(f"文献卡片生成任务已入队：#{job_id}。worker 完成后会自动保存到所选卡片库。")
         except Exception as exc:
@@ -3233,13 +3035,11 @@ def render_literature_card_save(
 
         if st.button("保存到所选卡片库", type="primary", use_container_width=True, key=f"save_card_{paper_id}"):
             try:
-                card_id = save_literature_card(
+                card_id = study_workflow.save_literature_card_markdown(
                     paper_id,
                     str(st.session_state.get(f"generated_card_preview_{paper_id}") or generated_markdown),
                     user_id=user_id,
                     library_id=int(selected_library_id),
-                    team_id=int(team_context["team_id"]),
-                    project_id=team_context.get("project_id"),
                 )
             except (ValueError, OSError, sqlite3.Error) as exc:
                 render_error_card("文献卡片保存失败", str(exc) or "请检查 SQLite 数据库权限。")
@@ -4737,101 +4537,31 @@ def save_uploaded_pdf_to_library(
     signature: str | None = None,
 ) -> dict[str, Any]:
     """Save an uploaded PDF and enqueue parsing plus indexing jobs."""
-    file_bytes = uploaded_file.getvalue()
-    digest = file_sha256(file_bytes)
-    existing_paper = find_team_paper_by_hash(
-        team_id,
-        digest,
-        statuses=("succeeded", "running", "queued", "failed"),
+    result = paper_workflow.save_uploaded_pdf_to_library(
+        file_name=uploaded_file.name,
+        file_bytes=uploaded_file.getvalue(),
+        user_id=current_user_id(),
+        team_id=team_id,
+        project_id=project_id,
+        signature=signature,
     )
-    if existing_paper:
-        pipeline = enqueue_upload_processing_pipeline(existing_paper)
-        refreshed_paper = get_accessible_paper(str(existing_paper["paper_id"]), current_user_id())
-        return {
-            "paper": refreshed_paper or existing_paper,
-            "job_id": pipeline.get("parse_job_id"),
-            "parse_job_id": pipeline.get("parse_job_id"),
-            "index_job_id": pipeline.get("index_job_id"),
-            "parse_reused": pipeline.get("parse_reused", False),
-            "index_reused": pipeline.get("index_reused", False),
-            "reused": True,
-            "signature": signature,
-            "message": upload_processing_message(True, pipeline),
-        }
-
-    saved_file = save_uploaded_pdf(uploaded_file)
-    save_paper_and_chunks(
-        {
-            "paper_id": saved_file["paper_id"],
-            "file_name": saved_file["file_name"],
-            "file_size_bytes": saved_file["file_size_bytes"],
-            "save_path": saved_file["save_path"],
-            "owner_user_id": current_user_id(),
-            "team_id": team_id,
-            "project_id": project_id,
-            "file_sha256": saved_file.get("file_sha256", digest),
-            "parse_status": "not_started",
-            "index_status": "unknown",
-            "translation_status": "not_started",
-            "page_count": 0,
-            "total_chars": 0,
-        },
-        [],
-    )
-    paper = get_accessible_paper(saved_file["paper_id"], current_user_id())
-    if not paper:
-        raise RuntimeError("saved paper is not accessible after upload")
-    pipeline = enqueue_upload_processing_pipeline(paper)
-    paper = get_accessible_paper(saved_file["paper_id"], current_user_id()) or paper
-    return {
-        "paper": paper,
-        "job_id": pipeline.get("parse_job_id"),
-        "parse_job_id": pipeline.get("parse_job_id"),
-        "index_job_id": pipeline.get("index_job_id"),
-        "parse_reused": pipeline.get("parse_reused", False),
-        "index_reused": pipeline.get("index_reused", False),
-        "reused": False,
-        "signature": signature,
-        "message": upload_processing_message(False, pipeline),
-    }
+    if result.get("index_job_id"):
+        paper_id = str((result.get("paper") or {}).get("paper_id") or "")
+        if paper_id:
+            index_status = str(result.get("index_job_status") or "queued")
+            state_label = paper_workflow.index_state_label(index_status)
+            st.session_state[f"index_state_{paper_id}"] = {"vector": state_label, "bm25": state_label}
+    result["message"] = upload_processing_message(bool(result.get("reused")), result)
+    return result
 
 
 def enqueue_paper_parse(paper_id: str, include_images: bool = False) -> dict[str, Any]:
     """Queue parsing for an existing paper without automatically enqueueing an index build."""
-    paper = get_accessible_paper(paper_id, current_user_id(), minimum_role="editor")
-    if not paper:
-        raise PermissionError("没有找到当前论文或无权解析。")
-
-    latest_parse_job = latest_job_for_paper(int(paper["team_id"]), paper_id, "parse")
-    if latest_parse_job and latest_parse_job.get("status") in {"queued", "running"}:
-        return {
-            "parse_job_id": int(latest_parse_job["job_id"]),
-            "index_job_id": None,
-            "reused": True,
-            "message": f"解析任务已在队列中：#{latest_parse_job['job_id']}。",
-        }
-
-    update_paper_status(paper_id, parse_status="queued", index_status="unknown")
-    parse_job_id = enqueue_job(
-        "parse",
+    return paper_workflow.queue_paper_parse(
+        paper_id,
         user_id=current_user_id(),
-        team_id=int(paper["team_id"]),
-        project_id=paper.get("project_id"),
-        paper_id=paper_id,
-        payload={
-            "paper_id": paper_id,
-            "save_path": paper.get("save_path"),
-            "auto_index": False,
-            "include_images": bool(include_images),
-        },
+        include_images=include_images,
     )
-    image_note = "，包含图片识别" if include_images else ""
-    return {
-        "parse_job_id": int(parse_job_id),
-        "index_job_id": None,
-        "reused": False,
-        "message": f"已提交解析任务：#{parse_job_id}{image_note}。解析完成后可手动选择是否构建索引。",
-    }
 
 
 def current_parse_status(processed_pdf: dict[str, Any] | None) -> str:
@@ -5919,20 +5649,13 @@ def render_translation_controls(processed_pdf: dict[str, Any]) -> None:
                 disabled=not can_edit,
             ):
                 try:
-                    job_id = enqueue_job(
-                        "translate",
+                    job_id = study_workflow.queue_markdown_translation(
+                        processed_pdf["saved_file"]["paper_id"],
                         user_id=current_user_id(),
-                        team_id=int(team_context["team_id"]),
-                        project_id=team_context.get("project_id"),
-                        paper_id=processed_pdf["saved_file"]["paper_id"],
-                        payload={
-                            "paper_id": processed_pdf["saved_file"]["paper_id"],
-                            "input_md_path": str(markdown_path),
-                            "output_md_path": str(zh_path),
-                            "force": bool(zh_exists),
-                        },
+                        input_md_path=markdown_path,
+                        output_md_path=zh_path,
+                        force=bool(zh_exists),
                     )
-                    update_paper_status(processed_pdf["saved_file"]["paper_id"], translation_status="queued")
                     st.success(f"翻译任务已入队：#{job_id}。worker 完成后可下载中文 Markdown。")
                 except Exception as exc:
                     logger.exception("Markdown translation failed.")
@@ -6048,20 +5771,13 @@ def render_reader_translation_button(
 
     try:
         del parsed_pdf
-        job_id = enqueue_job(
-            "translate",
+        job_id = study_workflow.queue_markdown_translation(
+            paper_id,
             user_id=current_user_id(),
-            team_id=int(team_context["team_id"]),
-            project_id=team_context.get("project_id"),
-            paper_id=paper_id,
-            payload={
-                "paper_id": paper_id,
-                "input_md_path": str(markdown_path),
-                "output_md_path": str(zh_path),
-                "force": bool(zh_exists),
-            },
+            input_md_path=markdown_path,
+            output_md_path=zh_path,
+            force=bool(zh_exists),
         )
-        update_paper_status(paper_id, translation_status="queued")
         st.success(f"翻译任务已入队：#{job_id}。worker 完成后可以切换中文译文或双语对照。")
     except Exception as exc:
         logger.exception("Markdown translation failed from reader.")

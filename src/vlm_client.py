@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from config import PROJECT_ROOT, settings
+from src.external_call import RetryPolicy, call_with_retries
 from src.logger import get_logger
 
 
@@ -40,6 +41,7 @@ class QwenVLMClient:
         timeout: float | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.model = model or settings.vlm_model
         self.api_key = api_key if api_key is not None else settings.vlm_api_key
@@ -49,6 +51,11 @@ class QwenVLMClient:
             temperature if temperature is not None else settings.vlm_temperature
         )
         self.max_tokens = max_tokens if max_tokens is not None else settings.vlm_max_tokens
+        self.retry_policy = retry_policy or RetryPolicy(
+            max_attempts=settings.external_api_max_attempts,
+            base_delay_seconds=settings.external_api_retry_base_seconds,
+            max_delay_seconds=settings.external_api_retry_max_seconds,
+        )
 
     def describe(self, image: dict[str, Any]) -> str:
         """Return a structured VLM description for one image metadata record."""
@@ -56,8 +63,8 @@ class QwenVLMClient:
         image_url = image_url_for_qwen(image)
         prompt = build_image_prompt(image)
 
-        try:
-            response = client.chat.completions.create(
+        def request_description():
+            return client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": QWEN_VLM_SYSTEM_PROMPT},
@@ -71,6 +78,14 @@ class QwenVLMClient:
                 ],
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+            )
+
+        try:
+            response = call_with_retries(
+                request_description,
+                operation_name="Qwen VLM image description",
+                logger=logger,
+                policy=self.retry_policy,
             )
         except Exception as exc:
             logger.exception("Qwen VLM call failed. model=%s base_url=%s", self.model, self.base_url)

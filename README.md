@@ -280,24 +280,31 @@ PDF
 
 ## 验证脚本
 
-基础语法检查：
+后端 smoke gate（本地、非网络）：
 
 ```bash
-python -m compileall app.py config.py src scripts
+python scripts/verify_backend.py
 ```
 
-本地逻辑测试：
+它会覆盖语法检查、schema 迁移、任务队列/worker、application 用例层、外部调用 retry 策略和 UI 非阻塞守卫。
+
+后端本地体检（不联网，会检查目录、SQLite、队列状态和关键配置是否存在，不输出密钥值）：
 
 ```bash
-python scripts/test_query_processor.py
-python scripts/test_query_planner.py
-python scripts/test_rrf.py
-python scripts/test_context_builder.py
-python scripts/test_reranker.py
-python scripts/test_bm25_store.py
-python scripts/test_evidence_expander.py
-python scripts/test_hybrid_retriever.py
-python scripts/test_mineru_visual_normalization.py
+python scripts/doctor_backend.py
+python scripts/doctor_backend.py --json
+```
+
+检索核心逻辑检查：
+
+```bash
+python scripts/verify_backend.py --suite retrieval
+```
+
+完整本地非网络检查：
+
+```bash
+python scripts/verify_backend.py --suite all
 ```
 
 检索评估：
@@ -305,6 +312,8 @@ python scripts/test_mineru_visual_normalization.py
 ```bash
 python scripts/eval_retrieval.py data/retrieval_seed.jsonl --disable-llm-rerank
 ```
+
+后端架构边界和验证约定见 `docs/BACKEND_ARCHITECTURE.md`。
 
 需要外部服务的连通性测试：
 

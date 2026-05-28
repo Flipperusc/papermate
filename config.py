@@ -189,6 +189,11 @@ class Settings:
     rerank_top_k: int = env_int("RERANK_TOP_K", 30)
     rerank_batch_size: int = env_int("RERANK_BATCH_SIZE", 8)
 
+    # Shared external API retry policy
+    external_api_max_attempts: int = env_int("EXTERNAL_API_MAX_ATTEMPTS", 2)
+    external_api_retry_base_seconds: float = env_float("EXTERNAL_API_RETRY_BASE_SECONDS", 1.0)
+    external_api_retry_max_seconds: float = env_float("EXTERNAL_API_RETRY_MAX_SECONDS", 8.0)
+
 
 settings = Settings()
 LOG_DIR = settings.log_dir

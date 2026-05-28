@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from config import settings
 from src.errors import ErrorCode, LLMError
+from src.external_call import RetryPolicy, call_with_retries
 from src.logger import get_logger
 
 
@@ -27,12 +28,18 @@ class LLMClient:
         base_url: str | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         timeout: float | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.model = model or settings.deepseek_model
         self.api_key = api_key if api_key is not None else settings.deepseek_api_key
         self.base_url = base_url or settings.deepseek_base_url
         self.system_prompt = system_prompt
         self.timeout = timeout
+        self.retry_policy = retry_policy or RetryPolicy(
+            max_attempts=settings.external_api_max_attempts,
+            base_delay_seconds=settings.external_api_retry_base_seconds,
+            max_delay_seconds=settings.external_api_retry_max_seconds,
+        )
 
     def _create_client(self):
         """Create an OpenAI SDK client pointed at DeepSeek, not OpenAI default."""
@@ -63,7 +70,7 @@ class LLMClient:
                 raise
             return DEEPSEEK_CALL_FAILED_MESSAGE
 
-        try:
+        def request_completion() -> str:
             response = client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -76,9 +83,16 @@ class LLMClient:
 
             content = response.choices[0].message.content
             if not content:
-                logger.error("DeepSeek returned an empty response.")
-                return DEEPSEEK_CALL_FAILED_MESSAGE
+                raise ValueError("DeepSeek returned an empty response")
             return content
+
+        try:
+            return call_with_retries(
+                request_completion,
+                operation_name="DeepSeek chat completion",
+                logger=logger,
+                policy=self.retry_policy,
+            )
         except Exception as exc:
             logger.exception("DeepSeek chat completion failed.")
             return DEEPSEEK_CALL_FAILED_MESSAGE

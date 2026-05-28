@@ -11,6 +11,9 @@ from src.team_service import require_team_role
 
 JOB_TYPES = {"parse", "index", "translate", "card", "eval"}
 JOB_STATUSES = {"queued", "running", "succeeded", "failed", "canceled"}
+DEFAULT_JOB_LEASE_SECONDS = 300
+DEFAULT_RETRY_BASE_DELAY_SECONDS = 30
+DEFAULT_RETRY_MAX_DELAY_SECONDS = 900
 
 
 def enqueue_job(
@@ -358,10 +361,20 @@ def latest_job_for_paper(team_id: int, paper_id: str, job_type: str | None = Non
 
 def claim_next_job(job_types: tuple[str, ...] | list[str] | None = None) -> dict[str, Any] | None:
     """Atomically claim the oldest queued job, optionally constrained by type."""
+    return claim_next_job_for_worker(job_types=job_types)
+
+
+def claim_next_job_for_worker(
+    job_types: tuple[str, ...] | list[str] | None = None,
+    worker_id: str | None = None,
+    lease_seconds: int = DEFAULT_JOB_LEASE_SECONDS,
+) -> dict[str, Any] | None:
+    """Atomically claim the oldest runnable queued job for a worker."""
     clean_types = tuple(dict.fromkeys(normalize_job_type(job_type) for job_type in (job_types or ())))
     where_clauses = [
         "j.status = 'queued'",
         "j.attempt_count < j.max_attempts",
+        "(j.next_run_at IS NULL OR j.next_run_at <= CURRENT_TIMESTAMP)",
         """
         NOT (
             j.job_type IN ('parse', 'index')
@@ -419,11 +432,19 @@ def claim_next_job(job_types: tuple[str, ...] | list[str] | None = None) -> dict
                 status = 'running',
                 attempt_count = attempt_count + 1,
                 locked_at = CURRENT_TIMESTAMP,
+                heartbeat_at = CURRENT_TIMESTAMP,
+                worker_id = ?,
+                lease_expires_at = datetime(CURRENT_TIMESTAMP, ?),
+                next_run_at = NULL,
                 started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
                 updated_at = CURRENT_TIMESTAMP
             WHERE job_id = ?
             """,
-            (job_id,),
+            (
+                worker_id,
+                sqlite_seconds_modifier(lease_seconds),
+                job_id,
+            ),
         )
         updated = connection.execute(
             "SELECT * FROM jobs WHERE job_id = ?",
@@ -436,6 +457,97 @@ def claim_next_job(job_types: tuple[str, ...] | list[str] | None = None) -> dict
         raise
     finally:
         connection.close()
+
+
+def heartbeat_job(
+    job_id: int,
+    worker_id: str | None = None,
+    lease_seconds: int = DEFAULT_JOB_LEASE_SECONDS,
+) -> bool:
+    """Extend the lease for a running job owned by worker_id."""
+    init_db()
+    with get_db_connection() as connection:
+        if worker_id:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET
+                    heartbeat_at = CURRENT_TIMESTAMP,
+                    lease_expires_at = datetime(CURRENT_TIMESTAMP, ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ?
+                    AND status = 'running'
+                    AND worker_id = ?
+                """,
+                (sqlite_seconds_modifier(lease_seconds), int(job_id), worker_id),
+            )
+        else:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET
+                    heartbeat_at = CURRENT_TIMESTAMP,
+                    lease_expires_at = datetime(CURRENT_TIMESTAMP, ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ?
+                    AND status = 'running'
+                """,
+                (sqlite_seconds_modifier(lease_seconds), int(job_id)),
+            )
+        return bool(cursor.rowcount)
+
+
+def requeue_expired_jobs(job_types: tuple[str, ...] | list[str] | None = None) -> list[dict[str, Any]]:
+    """Requeue running jobs whose worker lease has expired."""
+    clean_types = tuple(dict.fromkeys(normalize_job_type(job_type) for job_type in (job_types or ())))
+    where_clauses = [
+        "status = 'running'",
+        "attempt_count < max_attempts",
+        "lease_expires_at IS NOT NULL",
+        "lease_expires_at <= CURRENT_TIMESTAMP",
+    ]
+    parameters: list[Any] = []
+    if clean_types:
+        placeholders = ", ".join("?" for _ in clean_types)
+        where_clauses.append(f"job_type IN ({placeholders})")
+        parameters.extend(clean_types)
+
+    init_db()
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT job_id, job_type, paper_id
+            FROM jobs
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY COALESCE(lease_expires_at, locked_at, started_at, updated_at, created_at) ASC, job_id ASC
+            """,
+            parameters,
+        ).fetchall()
+        jobs = [dict(row) for row in rows]
+        if not jobs:
+            return []
+
+        job_ids = [int(job["job_id"]) for job in jobs]
+        id_placeholders = ", ".join("?" for _ in job_ids)
+        connection.execute(
+            f"""
+            UPDATE jobs
+            SET
+                status = 'queued',
+                worker_id = NULL,
+                locked_at = NULL,
+                heartbeat_at = NULL,
+                lease_expires_at = NULL,
+                started_at = NULL,
+                error_message = 'worker lease expired; job returned to queue',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE job_id IN ({id_placeholders})
+                AND status = 'running'
+            """,
+            job_ids,
+        )
+        update_running_paper_statuses(connection, jobs)
+        return [normalize_job_row(job) for job in jobs]
 
 
 def requeue_running_jobs(job_types: tuple[str, ...] | list[str] | None = None) -> list[dict[str, Any]]:
@@ -470,7 +582,11 @@ def requeue_running_jobs(job_types: tuple[str, ...] | list[str] | None = None) -
             UPDATE jobs
             SET
                 status = 'queued',
+                worker_id = NULL,
                 locked_at = NULL,
+                heartbeat_at = NULL,
+                lease_expires_at = NULL,
+                next_run_at = NULL,
                 started_at = NULL,
                 error_message = '',
                 updated_at = CURRENT_TIMESTAMP
@@ -521,6 +637,11 @@ def complete_job(job_id: int, result: dict[str, Any] | None = None) -> None:
                 status = 'succeeded',
                 result_json = ?,
                 error_message = '',
+                worker_id = NULL,
+                locked_at = NULL,
+                heartbeat_at = NULL,
+                lease_expires_at = NULL,
+                next_run_at = NULL,
                 finished_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
             WHERE job_id = ?
@@ -529,10 +650,64 @@ def complete_job(job_id: int, result: dict[str, Any] | None = None) -> None:
         )
 
 
-def fail_job(job_id: int, error_message: str, result: dict[str, Any] | None = None) -> None:
-    """Mark a job failed."""
+def fail_job(
+    job_id: int,
+    error_message: str,
+    result: dict[str, Any] | None = None,
+    *,
+    auto_retry: bool = False,
+    retry_delay_seconds: int | None = None,
+    error_code: str = "",
+) -> None:
+    """Mark a job failed, or return it to the queue when auto-retry is enabled."""
     init_db()
     with get_db_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT attempt_count, max_attempts
+            FROM jobs
+            WHERE job_id = ?
+            """,
+            (int(job_id),),
+        ).fetchone()
+        should_retry = False
+        delay_seconds = int(retry_delay_seconds or 0)
+        if row and auto_retry:
+            attempt_count = int(row["attempt_count"] or 0)
+            max_attempts = int(row["max_attempts"] or 1)
+            should_retry = attempt_count < max_attempts
+            if should_retry and delay_seconds <= 0:
+                delay_seconds = retry_delay_for_attempt(attempt_count)
+
+        if should_retry:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET
+                    status = 'queued',
+                    result_json = ?,
+                    error_message = ?,
+                    last_error_code = ?,
+                    worker_id = NULL,
+                    locked_at = NULL,
+                    heartbeat_at = NULL,
+                    lease_expires_at = NULL,
+                    next_run_at = datetime(CURRENT_TIMESTAMP, ?),
+                    started_at = NULL,
+                    finished_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ?
+                """,
+                (
+                    json.dumps(result or {}, ensure_ascii=False),
+                    str(error_message or "")[:4000],
+                    str(error_code or "")[:120],
+                    sqlite_seconds_modifier(delay_seconds),
+                    int(job_id),
+                ),
+            )
+            return
+
         connection.execute(
             """
             UPDATE jobs
@@ -540,6 +715,12 @@ def fail_job(job_id: int, error_message: str, result: dict[str, Any] | None = No
                 status = 'failed',
                 result_json = ?,
                 error_message = ?,
+                last_error_code = ?,
+                worker_id = NULL,
+                locked_at = NULL,
+                heartbeat_at = NULL,
+                lease_expires_at = NULL,
+                next_run_at = NULL,
                 finished_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
             WHERE job_id = ?
@@ -547,6 +728,7 @@ def fail_job(job_id: int, error_message: str, result: dict[str, Any] | None = No
             (
                 json.dumps(result or {}, ensure_ascii=False),
                 str(error_message or "")[:4000],
+                str(error_code or "")[:120],
                 int(job_id),
             ),
         )
@@ -565,6 +747,12 @@ def retry_job(user_id: int, job_id: int) -> None:
             SET
                 status = 'queued',
                 error_message = '',
+                worker_id = NULL,
+                locked_at = NULL,
+                heartbeat_at = NULL,
+                lease_expires_at = NULL,
+                next_run_at = NULL,
+                started_at = NULL,
                 finished_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE job_id = ?
@@ -587,6 +775,11 @@ def cancel_job(user_id: int, job_id: int) -> None:
             UPDATE jobs
             SET
                 status = 'canceled',
+                worker_id = NULL,
+                locked_at = NULL,
+                heartbeat_at = NULL,
+                lease_expires_at = NULL,
+                next_run_at = NULL,
                 finished_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
             WHERE job_id = ?
@@ -611,6 +804,11 @@ def cancel_queued_job(user_id: int, job_id: int) -> bool:
             SET
                 status = 'canceled',
                 error_message = 'removed from queue by user',
+                worker_id = NULL,
+                locked_at = NULL,
+                heartbeat_at = NULL,
+                lease_expires_at = NULL,
+                next_run_at = NULL,
                 finished_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
             WHERE job_id = ?
@@ -659,3 +857,16 @@ def parse_json_field(value: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def retry_delay_for_attempt(attempt_count: int) -> int:
+    """Return exponential retry delay after the current failed attempt."""
+    exponent = max(0, int(attempt_count) - 1)
+    delay = DEFAULT_RETRY_BASE_DELAY_SECONDS * (2**exponent)
+    return min(DEFAULT_RETRY_MAX_DELAY_SECONDS, delay)
+
+
+def sqlite_seconds_modifier(seconds: int | float) -> str:
+    """Return a SQLite datetime modifier for a positive second interval."""
+    clean_seconds = max(1, int(seconds or 1))
+    return f"+{clean_seconds} seconds"

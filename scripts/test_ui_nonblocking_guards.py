@@ -169,9 +169,9 @@ def test_upload_pipeline_enqueues_parse_and_waiting_index() -> None:
 
     original_st = app.st
     original_current_user_id = app.current_user_id
-    original_latest_job_for_paper = app.latest_job_for_paper
-    original_enqueue_job = app.enqueue_job
-    original_update_paper_status = app.update_paper_status
+    original_latest_job_for_paper = app.paper_workflow.latest_job_for_paper
+    original_enqueue_job = app.paper_workflow.enqueue_job
+    original_update_paper_status = app.paper_workflow.update_paper_status
 
     def fake_latest_job_for_paper(team_id: int, paper_id: str, job_type: str | None = None) -> dict[str, Any] | None:
         return None
@@ -206,17 +206,17 @@ def test_upload_pipeline_enqueues_parse_and_waiting_index() -> None:
     try:
         app.st = FakeStreamlit()
         app.current_user_id = lambda: 9
-        app.latest_job_for_paper = fake_latest_job_for_paper
-        app.enqueue_job = fake_enqueue_job
-        app.update_paper_status = fake_update_paper_status
+        app.paper_workflow.latest_job_for_paper = fake_latest_job_for_paper
+        app.paper_workflow.enqueue_job = fake_enqueue_job
+        app.paper_workflow.update_paper_status = fake_update_paper_status
 
         pipeline = app.enqueue_upload_processing_pipeline(paper)
     finally:
         app.st = original_st
         app.current_user_id = original_current_user_id
-        app.latest_job_for_paper = original_latest_job_for_paper
-        app.enqueue_job = original_enqueue_job
-        app.update_paper_status = original_update_paper_status
+        app.paper_workflow.latest_job_for_paper = original_latest_job_for_paper
+        app.paper_workflow.enqueue_job = original_enqueue_job
+        app.paper_workflow.update_paper_status = original_update_paper_status
 
     assert pipeline["parse_job_id"] == 101
     assert pipeline["index_job_id"] == 102
