@@ -3459,33 +3459,6 @@ def inject_global_css() -> None:
         .pm-mobile-only {
           display: none;
         }
-        .pm-mobile-jumpbar {
-          position: sticky;
-          top: 8px;
-          z-index: 30;
-          display: none;
-          grid-template-columns: repeat(4, minmax(0, 1fr));
-          gap: 7px;
-          margin: 0 0 12px;
-          padding: 8px;
-          border: 1px solid var(--pm-border);
-          border-radius: 16px;
-          background: rgba(255,255,255,.94);
-          box-shadow: var(--pm-shadow-soft);
-          backdrop-filter: blur(12px);
-        }
-        .pm-mobile-jumpbar a {
-          display: inline-flex;
-          justify-content: center;
-          align-items: center;
-          min-height: 34px;
-          border-radius: 11px;
-          background: #F8FAFC;
-          color: var(--pm-text);
-          font-size: 12px;
-          font-weight: 850;
-          text-decoration: none;
-        }
         .pm-mobile-paper-card {
           border: 1px solid var(--pm-border);
           border-radius: 16px;
@@ -3550,23 +3523,6 @@ def inject_global_css() -> None:
           height: 100%;
           border-radius: inherit;
           background: linear-gradient(90deg, var(--pm-primary), var(--pm-cyan));
-        }
-        .pm-mobile-progress-steps {
-          display: grid;
-          grid-template-columns: repeat(5, minmax(0, 1fr));
-          gap: 5px;
-          margin-top: 9px;
-        }
-        .pm-mobile-progress-dot {
-          height: 5px;
-          border-radius: 999px;
-          background: #E2E8F0;
-        }
-        .pm-mobile-progress-dot-done {
-          background: rgba(22,163,74,.72);
-        }
-        .pm-mobile-progress-dot-active {
-          background: var(--pm-primary);
         }
         .pm-reader-anchor,
         .pm-upload-anchor {
@@ -4504,21 +4460,18 @@ def inject_global_css() -> None:
           .block-container {
             padding: 0.58rem 0.7rem 6.8rem;
           }
-          html,
-          body,
-          .stApp,
-          [data-testid="stMarkdownContainer"],
-          [data-testid="stWidgetLabel"],
-          div[data-testid="stTextInput"] input,
-          div[data-testid="stTextArea"] textarea,
-          div[data-testid="stSelectbox"] div[data-baseweb="select"] {
-            font-size: 13px !important;
+          section[data-testid="stSidebar"] {
+            width: min(72vw, 260px) !important;
+            min-width: min(72vw, 260px) !important;
+            max-width: 260px !important;
+          }
+          section[data-testid="stSidebar"] > div {
+            width: min(72vw, 260px) !important;
+            padding-left: 0.75rem;
+            padding-right: 0.75rem;
           }
           .pm-mobile-only {
             display: block;
-          }
-          .pm-mobile-jumpbar {
-            display: grid;
           }
           .st-key-pm_paper_library_desktop_table,
           .st-key-pm_card_library_desktop_list,
@@ -4538,20 +4491,7 @@ def inject_global_css() -> None:
           }
           div[data-testid="stAlert"] {
             border-radius: 18px;
-            font-size: 12px;
             padding: 9px 11px;
-          }
-          div[data-testid="stCaptionContainer"] {
-            font-size: 11px;
-          }
-          h1 {
-            font-size: 21px !important;
-          }
-          h2 {
-            font-size: 17px !important;
-          }
-          h3 {
-            font-size: 15px !important;
           }
           p,
           li {
@@ -4562,7 +4502,6 @@ def inject_global_css() -> None:
           button[kind="primary"] {
             min-height: 2.18rem;
             border-radius: 18px !important;
-            font-size: 12px !important;
             box-shadow: 0 7px 18px rgba(15,23,42,.06) !important;
           }
           div[data-testid="stTextInput"] input,
@@ -4577,12 +4516,8 @@ def inject_global_css() -> None:
             gap: 4px;
           }
           div[data-testid="stTabs"] button[role="tab"] {
-            font-size: 12px;
             padding: 6px 9px;
             border-radius: 16px 16px 0 0;
-          }
-          div[data-testid="stExpander"] details summary {
-            font-size: 12px;
           }
           div[data-testid="stFileUploader"] {
             padding: 9px;
@@ -4593,7 +4528,7 @@ def inject_global_css() -> None:
             margin-bottom: 10px;
           }
           .pm-hero h1 {
-            font-size: 21px;
+            font-size: 24px;
             margin-bottom: 0;
           }
           .pm-hero p {
@@ -4636,28 +4571,28 @@ def inject_global_css() -> None:
             gap: 5px;
           }
           .pm-badge {
-            font-size: 10.5px;
+            font-size: 11px;
             padding: 3px 7px;
             border-radius: 999px;
           }
           .pm-section-title {
-            font-size: 15px;
+            font-size: 18px;
           }
           .pm-card-title,
           .pm-mobile-paper-title {
-            font-size: 14px;
+            font-size: 17px;
           }
           .pm-detail-title {
-            font-size: 17px;
+            font-size: 22px;
           }
           .pm-card-meta,
           .pm-mobile-paper-meta,
           .pm-small {
-            font-size: 11px;
+            font-size: 12px;
           }
           .pm-chip {
-            font-size: 10.5px;
-            padding: 3px 7px;
+            font-size: 11px;
+            padding: 3px 9px;
           }
           .pm-metric-card {
             min-height: auto;
@@ -4665,10 +4600,10 @@ def inject_global_css() -> None:
             border-radius: 18px;
           }
           .pm-metric-value {
-            font-size: 14px;
+            font-size: 16px;
           }
           .pm-metric-label {
-            font-size: 10.5px;
+            font-size: 12px;
             margin-bottom: 3px;
           }
           .pm-metric-icon {
@@ -4688,13 +4623,13 @@ def inject_global_css() -> None:
             margin: 9px 0;
           }
           .pm-chat-role {
-            font-size: 10.5px;
+            font-size: 12px;
           }
           .pm-chat-content,
           .pm-reference-text,
           .pm-detail-section div,
           .pm-block-content {
-            font-size: 13px;
+            font-size: 14px;
             line-height: 1.62;
           }
           .pm-reference-text,
@@ -4705,7 +4640,7 @@ def inject_global_css() -> None:
           .pm-source-block,
           .pm-target-block {
             padding: 13px;
-            font-size: 13px;
+            font-size: 14px;
             line-height: 1.66;
           }
           .pm-bilingual-block {
@@ -5802,18 +5737,6 @@ def render_workspace_page() -> None:
         ],
     )
     render_workflow_steps(progress_steps)
-    st.markdown(
-        """
-        <div class="pm-mobile-only pm-mobile-jumpbar">
-          <a href="#pm-upload-anchor">上传</a>
-          <a href="#pm-status-anchor">状态</a>
-          <a href="#pm-reader-anchor">阅读</a>
-          <a href="#pm-qa-anchor">问答</a>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
     saved_file = processed_pdf.get("saved_file", {}) if processed_pdf else {}
     chunks = processed_pdf.get("chunks", []) if processed_pdf else []
     st.markdown('<span id="pm-status-anchor" class="pm-upload-anchor"></span>', unsafe_allow_html=True)
@@ -6192,12 +6115,6 @@ def render_mobile_workspace_progress(steps: list[dict[str, str]]) -> None:
 
     progress = int(max(8, min(100, ((active_index + 1) / total) * 100)))
     active_step = steps[min(active_index, len(steps) - 1)] if steps else {"title": "准备"}
-    dots = []
-    for index, step in enumerate(steps):
-        status = str(step.get("status") or "pending")
-        dot_status = "done" if status == "done" else "active" if index == active_index else "pending"
-        dots.append(f'<div class="pm-mobile-progress-dot pm-mobile-progress-dot-{html.escape(dot_status)}"></div>')
-
     st.markdown(
         f"""
         <div class="pm-mobile-only pm-mobile-workspace-progress">
@@ -6208,7 +6125,6 @@ def render_mobile_workspace_progress(steps: list[dict[str, str]]) -> None:
           <div class="pm-mobile-progress-track">
             <div class="pm-mobile-progress-fill" style="width:{progress}%"></div>
           </div>
-          <div class="pm-mobile-progress-steps">{"".join(dots)}</div>
         </div>
         """,
         unsafe_allow_html=True,
