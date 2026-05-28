@@ -3512,6 +3512,62 @@ def inject_global_css() -> None:
           line-height: 1.55;
           margin-bottom: 9px;
         }
+        .pm-mobile-workspace-progress {
+          margin: 0 0 10px;
+          padding: 10px 12px;
+          border: 1px solid rgba(148,163,184,.22);
+          border-radius: 22px;
+          background: rgba(255,255,255,.92);
+          box-shadow: 0 12px 32px rgba(15,23,42,.08);
+          backdrop-filter: blur(14px);
+        }
+        .pm-mobile-progress-top {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          margin-bottom: 8px;
+        }
+        .pm-mobile-progress-label {
+          color: var(--pm-text);
+          font-size: 13px;
+          font-weight: 900;
+          line-height: 1.2;
+        }
+        .pm-mobile-progress-count {
+          color: var(--pm-muted);
+          font-size: 11px;
+          font-weight: 850;
+          white-space: nowrap;
+        }
+        .pm-mobile-progress-track {
+          height: 7px;
+          border-radius: 999px;
+          background: #E2E8F0;
+          overflow: hidden;
+        }
+        .pm-mobile-progress-fill {
+          height: 100%;
+          border-radius: inherit;
+          background: linear-gradient(90deg, var(--pm-primary), var(--pm-cyan));
+        }
+        .pm-mobile-progress-steps {
+          display: grid;
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+          gap: 5px;
+          margin-top: 9px;
+        }
+        .pm-mobile-progress-dot {
+          height: 5px;
+          border-radius: 999px;
+          background: #E2E8F0;
+        }
+        .pm-mobile-progress-dot-done {
+          background: rgba(22,163,74,.72);
+        }
+        .pm-mobile-progress-dot-active {
+          background: var(--pm-primary);
+        }
         .pm-reader-anchor,
         .pm-upload-anchor {
           display: block;
@@ -4446,7 +4502,17 @@ def inject_global_css() -> None:
         }
         @media (max-width: 760px) {
           .block-container {
-            padding: 0.72rem 0.75rem 6.8rem;
+            padding: 0.58rem 0.7rem 6.8rem;
+          }
+          html,
+          body,
+          .stApp,
+          [data-testid="stMarkdownContainer"],
+          [data-testid="stWidgetLabel"],
+          div[data-testid="stTextInput"] input,
+          div[data-testid="stTextArea"] textarea,
+          div[data-testid="stSelectbox"] div[data-baseweb="select"] {
+            font-size: 13px !important;
           }
           .pm-mobile-only {
             display: block;
@@ -4460,6 +4526,9 @@ def inject_global_css() -> None:
           .st-key-pm_qa_desktop_quick {
             display: none !important;
           }
+          .pm-workflow {
+            display: none;
+          }
           .st-key-pm_workspace_reader_qa_flow div[data-testid="stHorizontalBlock"] {
             flex-direction: column;
           }
@@ -4467,25 +4536,92 @@ def inject_global_css() -> None:
             width: 100% !important;
             flex: 1 1 100% !important;
           }
+          div[data-testid="stAlert"] {
+            border-radius: 18px;
+            font-size: 12px;
+            padding: 9px 11px;
+          }
+          div[data-testid="stCaptionContainer"] {
+            font-size: 11px;
+          }
+          h1 {
+            font-size: 21px !important;
+          }
+          h2 {
+            font-size: 17px !important;
+          }
+          h3 {
+            font-size: 15px !important;
+          }
+          p,
+          li {
+            line-height: 1.55;
+          }
+          .stButton > button,
+          .stDownloadButton > button,
+          button[kind="primary"] {
+            min-height: 2.18rem;
+            border-radius: 18px !important;
+            font-size: 12px !important;
+            box-shadow: 0 7px 18px rgba(15,23,42,.06) !important;
+          }
+          div[data-testid="stTextInput"] input,
+          div[data-testid="stTextArea"] textarea,
+          div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+          div[data-testid="stFileUploader"],
+          div[data-testid="stExpander"],
+          div[data-testid="stTabs"] [aria-selected="true"] {
+            border-radius: 18px !important;
+          }
+          div[data-testid="stTabs"] [role="tablist"] {
+            gap: 4px;
+          }
+          div[data-testid="stTabs"] button[role="tab"] {
+            font-size: 12px;
+            padding: 6px 9px;
+            border-radius: 16px 16px 0 0;
+          }
+          div[data-testid="stExpander"] details summary {
+            font-size: 12px;
+          }
+          div[data-testid="stFileUploader"] {
+            padding: 9px;
+          }
           .pm-hero {
-            padding: 16px;
-            border-radius: 16px;
-            margin-bottom: 12px;
+            padding: 12px 14px;
+            border-radius: 22px;
+            margin-bottom: 10px;
           }
           .pm-hero h1 {
-            font-size: 24px;
+            font-size: 21px;
+            margin-bottom: 0;
           }
           .pm-hero p {
-            font-size: 13px;
-            line-height: 1.55;
+            display: none;
+          }
+          .pm-hero .pm-badges {
+            margin-top: 8px;
           }
           .pm-section-card,
           .pm-panel,
           .pm-detail-panel,
           .pm-reference-card,
           .pm-chat-message {
-            border-radius: 16px;
-            padding: 13px;
+            border-radius: 20px;
+            padding: 12px;
+            box-shadow: 0 8px 24px rgba(15,23,42,.06);
+          }
+          .pm-section-card {
+            margin-bottom: 9px;
+          }
+          .pm-section-description,
+          .pm-empty-description,
+          .pm-metric-helper,
+          .pm-step-helper,
+          .pm-card-summary strong,
+          .pm-sidebar-brand-subtitle,
+          .pm-auth-intro p {
+            display: none;
           }
           .pm-section-heading,
           .pm-file-capsule,
@@ -4497,18 +4633,49 @@ def inject_global_css() -> None:
           .pm-badges,
           .pm-toolbar,
           .pm-chip-row {
-            gap: 6px;
+            gap: 5px;
           }
           .pm-badge {
+            font-size: 10.5px;
+            padding: 3px 7px;
+            border-radius: 999px;
+          }
+          .pm-section-title {
+            font-size: 15px;
+          }
+          .pm-card-title,
+          .pm-mobile-paper-title {
+            font-size: 14px;
+          }
+          .pm-detail-title {
+            font-size: 17px;
+          }
+          .pm-card-meta,
+          .pm-mobile-paper-meta,
+          .pm-small {
             font-size: 11px;
-            padding: 3px 8px;
+          }
+          .pm-chip {
+            font-size: 10.5px;
+            padding: 3px 7px;
           }
           .pm-metric-card {
             min-height: auto;
-            padding: 12px;
+            padding: 10px;
+            border-radius: 18px;
           }
           .pm-metric-value {
-            font-size: 16px;
+            font-size: 14px;
+          }
+          .pm-metric-label {
+            font-size: 10.5px;
+            margin-bottom: 3px;
+          }
+          .pm-metric-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 9px;
+            margin-bottom: 5px;
           }
           .pm-workflow {
             gap: 7px;
@@ -4520,6 +4687,16 @@ def inject_global_css() -> None:
           .pm-chat-message {
             margin: 9px 0;
           }
+          .pm-chat-role {
+            font-size: 10.5px;
+          }
+          .pm-chat-content,
+          .pm-reference-text,
+          .pm-detail-section div,
+          .pm-block-content {
+            font-size: 13px;
+            line-height: 1.62;
+          }
           .pm-reference-text,
           .pm-detail-section div,
           .pm-block-content {
@@ -4528,18 +4705,45 @@ def inject_global_css() -> None:
           .pm-source-block,
           .pm-target-block {
             padding: 13px;
-            font-size: 14px;
-            line-height: 1.72;
+            font-size: 13px;
+            line-height: 1.66;
           }
           .pm-bilingual-block {
-            border-radius: 14px;
+            border-radius: 20px;
             margin-bottom: 12px;
           }
           .pm-bilingual-flow {
             padding: 10px;
           }
+          .pm-literature-card,
+          .pm-mobile-paper-card,
+          .pm-detail-section,
+          .pm-card-summary,
+          .pm-empty-state,
+          .pm-error-card,
+          .pm-file-capsule {
+            border-radius: 20px;
+          }
+          .pm-empty-state {
+            padding: 18px 14px;
+          }
+          .pm-empty-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 14px;
+            font-size: 16px;
+          }
+          .pm-empty-title {
+            font-size: 15px;
+          }
+          .pm-literature-card,
+          .pm-mobile-paper-card {
+            padding: 12px;
+            margin-bottom: 9px;
+          }
           iframe.pm-pdf {
             height: 58vh;
+            border-radius: 20px;
           }
         }
         </style>
@@ -5579,7 +5783,15 @@ def render_workspace_page() -> None:
     index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
     qa_done = bool(paper_id and st.session_state.get(f"last_qa_{paper_id}"))
     card_done = bool(paper_id and st.session_state.get(f"saved_card_id_{paper_id}"))
+    progress_steps = [
+        {"title": "上传", "helper": "选择论文文件", "status": "done" if paper_open else "active"},
+        {"title": "解析", "helper": "Markdown 与表格", "status": "done" if parse_done else ("active" if paper_open else "pending")},
+        {"title": "索引", "helper": "Chroma + BM25", "status": "done" if index_ready else ("active" if parse_done else "pending")},
+        {"title": "问答", "helper": "基于原文引用", "status": "done" if qa_done else ("active" if index_ready else "pending")},
+        {"title": "卡片", "helper": "沉淀研究笔记", "status": "done" if card_done else ("active" if qa_done else "pending")},
+    ]
 
+    render_mobile_workspace_progress(progress_steps)
     render_app_header(
         "论文工作台",
         "上传 PDF 后自动进入解析和索引队列，并基于可信引用追问论文。",
@@ -5589,15 +5801,7 @@ def render_workspace_page() -> None:
             render_status_badge("知识沉淀", "primary"),
         ],
     )
-    render_workflow_steps(
-        [
-            {"title": "上传 PDF", "helper": "选择论文文件", "status": "done" if paper_open else "active"},
-            {"title": "解析正文", "helper": "Markdown 与表格", "status": "done" if parse_done else ("active" if paper_open else "pending")},
-            {"title": "构建索引", "helper": "Chroma + BM25", "status": "done" if index_ready else ("active" if parse_done else "pending")},
-            {"title": "开始问答", "helper": "基于原文引用", "status": "done" if qa_done else ("active" if index_ready else "pending")},
-            {"title": "生成卡片", "helper": "沉淀研究笔记", "status": "done" if card_done else ("active" if qa_done else "pending")},
-        ]
-    )
+    render_workflow_steps(progress_steps)
     st.markdown(
         """
         <div class="pm-mobile-only pm-mobile-jumpbar">
@@ -5968,6 +6172,45 @@ def render_workflow_steps(steps: list[dict[str, str]]) -> None:
         )
     st.markdown(
         '<div class="pm-workflow">{items}</div>'.format(items="".join(items)),
+        unsafe_allow_html=True,
+    )
+
+
+def render_mobile_workspace_progress(steps: list[dict[str, str]]) -> None:
+    """Render a compact mobile-only progress bar for the workspace."""
+    total = max(len(steps), 1)
+    active_index = 0
+    done_count = 0
+    for index, step in enumerate(steps):
+        status = str(step.get("status") or "pending")
+        if status == "done":
+            done_count += 1
+            active_index = index
+        elif status == "active":
+            active_index = index
+            break
+
+    progress = int(max(8, min(100, ((active_index + 1) / total) * 100)))
+    active_step = steps[min(active_index, len(steps) - 1)] if steps else {"title": "准备"}
+    dots = []
+    for index, step in enumerate(steps):
+        status = str(step.get("status") or "pending")
+        dot_status = "done" if status == "done" else "active" if index == active_index else "pending"
+        dots.append(f'<div class="pm-mobile-progress-dot pm-mobile-progress-dot-{html.escape(dot_status)}"></div>')
+
+    st.markdown(
+        f"""
+        <div class="pm-mobile-only pm-mobile-workspace-progress">
+          <div class="pm-mobile-progress-top">
+            <div class="pm-mobile-progress-label">{html.escape(str(active_step.get("title") or "准备"))}</div>
+            <div class="pm-mobile-progress-count">{done_count}/{total}</div>
+          </div>
+          <div class="pm-mobile-progress-track">
+            <div class="pm-mobile-progress-fill" style="width:{progress}%"></div>
+          </div>
+          <div class="pm-mobile-progress-steps">{"".join(dots)}</div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
