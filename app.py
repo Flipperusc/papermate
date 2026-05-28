@@ -92,8 +92,10 @@ from src.vector_store import VectorStore
 logger = get_logger(__name__)
 BILINGUAL_ALIGNMENT_CACHE_VERSION = "header-image-notices-v2"
 QUEUE_REFRESH_SECONDS = 5
-QUEUE_HOVER_LIMIT = 10
-QUEUE_CANCEL_QUERY_PARAM = "pm_cancel_queue_job"
+QUEUE_MANAGER_LIMIT = 10
+QUEUE_DELETE_QUERY_PARAM = "pm_delete_queue_job"
+PAPER_PARSE_TERMINAL_STATUSES = {"succeeded", "failed"}
+PAPER_INDEX_TERMINAL_STATUSES = {"succeeded", "partial", "failed"}
 SOURCE_READING_MODE = "\u539f\u6587"
 SOURCE_JUMP_LABEL = "\u56de\u5230\u539f\u6587"
 
@@ -2094,9 +2096,10 @@ def queue_job_display_state(job: dict[str, Any] | None) -> tuple[str, str]:
 
 
 def render_queue_lane(label: str, job: dict[str, Any] | None) -> str:
-    """Render one queue lane with running or waiting paper content."""
-    paper_label = queue_job_paper_label(job)
-    modifier, state = queue_job_display_state(job)
+    """Render one queue lane with only the currently running paper."""
+    running_job = job if str((job or {}).get("status") or "").strip().lower() == "running" else None
+    paper_label = queue_job_paper_label(running_job)
+    modifier, state = queue_job_display_state(running_job)
     return (
         f'<div class="pm-queue-lane pm-queue-lane-{modifier}">'
         f'<div class="pm-queue-lane-label">{html.escape(label)}</div>'
@@ -2106,11 +2109,11 @@ def render_queue_lane(label: str, job: dict[str, Any] | None) -> str:
     )
 
 
-def queue_row_state_label(job: dict[str, Any]) -> str:
-    """Return a short state for queue hover rows."""
+def queue_job_state_label(job: dict[str, Any]) -> str:
+    """Return a short readable state for queue management rows."""
     modifier, state = queue_job_display_state(job)
     if modifier == "blocked":
-        return "等解析"
+        return "等待解析"
     if modifier == "queued":
         return "排队中"
     if modifier == "active":
@@ -2118,41 +2121,92 @@ def queue_row_state_label(job: dict[str, Any]) -> str:
     return state
 
 
-def queue_remove_href(job_id: Any) -> str:
-    """Return the URL used by the queue hover panel to remove one queued job."""
-    return f"?{QUEUE_CANCEL_QUERY_PARAM}={html.escape(str(job_id))}"
+def queue_job_wait_reason(job: dict[str, Any]) -> str:
+    """Return why a queued job is waiting, when known."""
+    if str(job.get("queue_block_reason") or "") == "waiting_for_parse":
+        return "等待 PDF 解析完成"
+    if str(job.get("status") or "").strip().lower() == "running":
+        return "处理中"
+    return ""
 
 
-def render_queue_rows(queued_jobs: list[dict[str, Any]], queued_count: int) -> str:
-    """Render up to QUEUE_HOVER_LIMIT queued papers for the hover panel."""
-    if not queued_jobs:
-        return '<div class="pm-queue-empty">当前没有等待中的解析或索引任务。</div>'
-    rows = []
-    for position, job in enumerate(queued_jobs[:QUEUE_HOVER_LIMIT], start=1):
-        job_type = queue_job_type_label(str(job.get("job_type") or ""))
-        paper_label = queue_job_paper_label(job)
-        job_id = job.get("job_id")
-        state_label = queue_row_state_label(job)
-        remove_link = ""
-        if str(job.get("status") or "") == "queued":
-            remove_link = (
-                f'<a class="pm-queue-remove" href="{queue_remove_href(job_id)}" '
-                'title="移除队列任务" aria-label="移除队列任务">×</a>'
-            )
-        rows.append(
-            (
-                '<div class="pm-queue-row">'
-                f'<div class="pm-queue-type">{html.escape(job_type)}</div>'
-                f'<div class="pm-queue-paper" title="{html.escape(paper_label)}">{html.escape(paper_label)}</div>'
-                f'<div class="pm-queue-meta">#{html.escape(str(job_id))} · {html.escape(state_label)}</div>'
-                f"{remove_link}"
-                "</div>"
-            )
+def queue_delete_href(job_id: Any) -> str:
+    """Return the URL used by the queue manager to remove one queued job."""
+    return f"?{QUEUE_DELETE_QUERY_PARAM}={html.escape(str(job_id))}"
+
+
+def queue_jobs_by_type(active_jobs: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Split active queue jobs into parse and index groups."""
+    grouped = {"parse": [], "index": []}
+    for job in active_jobs[:QUEUE_MANAGER_LIMIT]:
+        job_type = str(job.get("job_type") or "").strip().lower()
+        if job_type in grouped:
+            grouped[job_type].append(job)
+    return grouped
+
+
+def render_queue_manager_job_row(job: dict[str, Any]) -> str:
+    """Render one queue manager row with a hover delete action for queued jobs."""
+    job_id = job.get("job_id")
+    status = str(job.get("status") or "").strip().lower()
+    state_label = queue_job_state_label(job)
+    wait_reason = queue_job_wait_reason(job)
+    paper_label = queue_job_paper_label(job)
+    attempts = f"{job.get('attempt_count') or 0}/{job.get('max_attempts') or 0}"
+    delete_link = ""
+    if status == "queued":
+        delete_link = (
+            f'<a class="pm-queue-manager-delete" href="{queue_delete_href(job_id)}" '
+            f'title="从队列删除任务 #{html.escape(str(job_id))}" '
+            f'aria-label="从队列删除任务 #{html.escape(str(job_id))}">×</a>'
         )
-    more_count = max(0, int(queued_count) - len(queued_jobs[:QUEUE_HOVER_LIMIT]))
-    if more_count:
-        rows.append(f'<div class="pm-queue-more">还有 {more_count} 条排队任务未显示</div>')
-    return "\n".join(rows)
+    reason_html = (
+        f'<span class="pm-queue-manager-reason">{html.escape(wait_reason)}</span>'
+        if wait_reason
+        else ""
+    )
+    return (
+        f'<div class="pm-queue-manager-row pm-queue-manager-row-{html.escape(status or "idle")}">'
+        f'<div class="pm-queue-manager-id">#{html.escape(str(job_id))}</div>'
+        f'<div class="pm-queue-manager-paper" title="{html.escape(paper_label)}">{html.escape(paper_label)}</div>'
+        f'<div class="pm-queue-manager-meta">{html.escape(state_label)} · {html.escape(attempts)}{reason_html}</div>'
+        f"{delete_link}"
+        "</div>"
+    )
+
+
+def render_queue_manager_group(title: str, jobs: list[dict[str, Any]]) -> str:
+    """Render one parse/index group for the queue manager."""
+    if not jobs:
+        rows_html = '<div class="pm-queue-manager-empty">当前没有活跃任务</div>'
+    else:
+        rows_html = "\n".join(render_queue_manager_job_row(job) for job in jobs)
+    return (
+        '<section class="pm-queue-manager-section">'
+        f'<div class="pm-queue-manager-section-title">{html.escape(title)}</div>'
+        f"{rows_html}"
+        "</section>"
+    )
+
+
+def render_queue_manager_groups(active_jobs: list[dict[str, Any]]) -> str:
+    """Render parse and index queue groups for the task manager panel."""
+    grouped = queue_jobs_by_type(active_jobs)
+    return "\n".join(
+        [
+            render_queue_manager_group("解析任务", grouped["parse"]),
+            render_queue_manager_group("索引任务", grouped["index"]),
+        ]
+    )
+
+
+def render_queue_task_manager(user_id: int, team_id: int, active_jobs: list[dict[str, Any]]) -> None:
+    """Render the expandable parse/index task manager."""
+    if not active_jobs:
+        st.caption("当前没有排队或运行中的解析/索引任务。")
+        return
+
+    st.markdown(render_queue_manager_groups(active_jobs), unsafe_allow_html=True)
 
 
 @st.fragment(run_every=QUEUE_REFRESH_SECONDS)
@@ -2164,7 +2218,7 @@ def render_global_queue_progress(user_id: int, team_id: int) -> None:
             int(user_id),
             int(team_id),
             job_types=("parse", "index"),
-            queued_limit=QUEUE_HOVER_LIMIT,
+            queued_limit=QUEUE_MANAGER_LIMIT,
         )
         st.session_state[state_key] = summary
     except Exception as exc:  # pragma: no cover - defensive UI guard
@@ -2173,14 +2227,14 @@ def render_global_queue_progress(user_id: int, team_id: int) -> None:
         if not isinstance(summary, dict):
             return
 
+    maybe_auto_refresh_workspace_after_completion(int(user_id))
+
     running_by_type = summary.get("running_by_type") or {}
-    queued_by_type = summary.get("queued_by_type") or {}
-    blocked_by_type = summary.get("blocked_by_type") or {}
-    parse_job = running_by_type.get("parse") or queued_by_type.get("parse")
-    index_job = running_by_type.get("index") or queued_by_type.get("index") or blocked_by_type.get("index")
+    parse_job = running_by_type.get("parse")
+    index_job = running_by_type.get("index")
     running_count = int(summary.get("running_count") or 0)
     queued_count = int(summary.get("queued_count") or 0)
-    queued_jobs = list(summary.get("queued") or [])
+    active_jobs = list(summary.get("active_jobs") or [])
     active_total = running_count + queued_count
     has_active_work = active_total > 0
     fill_height = 100 if running_count else (46 if queued_count else 0)
@@ -2194,36 +2248,33 @@ def render_global_queue_progress(user_id: int, team_id: int) -> None:
         else "后台队列空闲"
     )
     subtitle = (
-        "每 5 秒自动刷新 · 悬停查看排队论文"
+        "每 5 秒自动刷新 · 仅显示当前处理任务"
         if has_active_work
         else "没有正在处理的解析或索引任务"
     )
-    queued_title = f"排队论文（最多显示 {QUEUE_HOVER_LIMIT} 条，共 {queued_count} 条）"
-    lanes_html = (
-        "\n".join(
-            [
-                '<div class="pm-queue-current">',
-                render_queue_lane("解析队列", parse_job),
-                render_queue_lane("索引队列", index_job),
-                "</div>",
-            ]
-        )
-        if has_active_work
-        else ""
+    lanes_html = "\n".join(
+        [
+            '<div class="pm-queue-current">',
+            render_queue_lane("解析队列", parse_job),
+            render_queue_lane("索引队列", index_job),
+            "</div>",
+        ]
     )
-    idle_html = '<div class="pm-queue-idle-card">当前没有正在处理的解析或索引任务。</div>' if not has_active_work else ""
-    popover_html = (
-        "\n".join(
-            [
-                '<div class="pm-queue-popover">',
-                f'<div class="pm-queue-popover-title">{html.escape(queued_title)}</div>',
-                render_queue_rows(queued_jobs, queued_count),
-                "</div>",
-            ]
-        )
-        if has_active_work
-        else ""
-    )
+
+    manager_key = f"pm_queue_manager_open_{int(team_id)}"
+    with st.container(key="pm_queue_manager_controls"):
+        is_open = bool(st.session_state.get(manager_key))
+        if st.button(
+            "收起任务" if is_open else "管理任务",
+            key=f"queue_manager_toggle_{int(team_id)}",
+            use_container_width=True,
+        ):
+            st.session_state[manager_key] = not is_open
+            st.rerun()
+        if st.session_state.get(manager_key):
+            with st.container(key="pm_queue_manager_panel"):
+                st.caption(f"解析/索引活跃任务前 {QUEUE_MANAGER_LIMIT} 条，按任务编号从小到大。")
+                render_queue_task_manager(int(user_id), int(team_id), active_jobs)
 
     queue_html = "\n".join(
         [
@@ -2239,9 +2290,7 @@ def render_global_queue_progress(user_id: int, team_id: int) -> None:
             f'<div class="{fill_class}" style="height:{fill_height}%"></div>',
             "</div>",
             lanes_html,
-            idle_html,
             "</div>",
-            popover_html,
             "</div>",
         ]
     )
@@ -2292,10 +2341,10 @@ def render_queue_action_notice() -> None:
         st.toast(str(notice))
 
 
-def handle_queue_cancel_query(user_id: int) -> None:
-    """Handle queue item removal links emitted inside the HTML hover panel."""
+def handle_queue_delete_query(user_id: int) -> None:
+    """Handle queue item removal links emitted by the task manager."""
     try:
-        raw_job_id = st.query_params.get(QUEUE_CANCEL_QUERY_PARAM)
+        raw_job_id = st.query_params.get(QUEUE_DELETE_QUERY_PARAM)
     except Exception:
         return
     if isinstance(raw_job_id, list):
@@ -2307,22 +2356,23 @@ def handle_queue_cancel_query(user_id: int) -> None:
         job_id = int(str(raw_job_id))
         removed = cancel_queued_job(int(user_id), job_id)
         st.session_state["pm_queue_action_notice"] = (
-            f"已移除队列任务 #{job_id}。"
+            f"已从队列删除任务 #{job_id}。"
             if removed
-            else f"任务 #{job_id} 不在排队中，未移除。"
+            else f"任务 #{job_id} 已开始处理或不在队列中，未删除。"
         )
     except Exception as exc:  # pragma: no cover - defensive UI guard
-        logger.warning("Queue job removal failed. job_id=%s error=%s", raw_job_id, exc)
-        st.session_state["pm_queue_action_notice"] = f"移除队列任务失败：{exc}"
+        logger.warning("Queue manager job removal failed. job_id=%s error=%s", raw_job_id, exc)
+        st.session_state["pm_queue_action_notice"] = f"删除队列任务失败：{exc}"
     finally:
         try:
-            del st.query_params[QUEUE_CANCEL_QUERY_PARAM]
+            del st.query_params[QUEUE_DELETE_QUERY_PARAM]
         except Exception:
             try:
                 st.query_params.clear()
             except Exception:
                 pass
         st.rerun()
+
 
 def render_app_shell() -> None:
     """Render a lightweight marker for the shared app shell."""
@@ -2807,18 +2857,15 @@ def render_reference_card(ref: dict[str, Any], index: int, expanded: bool = Fals
     )
 
 
-def render_citations(citations: list[dict[str, Any]]) -> None:
+def render_citations(citations: list[dict[str, Any]], expanded: bool = False) -> None:
     """Render citations produced from chunk metadata."""
-    st.markdown("#### 可信引用")
     if not citations:
+        st.markdown("#### 可信引用")
         render_empty_state("暂无可信引用", "当前回答没有可展示的引用来源。", icon="🔎")
         return
-    for index, citation in enumerate(citations[:3], start=1):
-        render_reference_card(citation, index, expanded=True)
-    if len(citations) > 3:
-        with st.expander(f"查看更多引用（{len(citations) - 3} 条）", expanded=False):
-            for index, citation in enumerate(citations[3:], start=4):
-                render_reference_card(citation, index)
+    with st.expander(f"可信引用（{len(citations)} 条）", expanded=expanded):
+        for index, citation in enumerate(citations, start=1):
+            render_reference_card(citation, index, expanded=index == 1 and expanded)
 
 
 def render_qa_box(paper_id: str) -> None:
@@ -2829,16 +2876,31 @@ def render_qa_box(paper_id: str) -> None:
     index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
     index_busy = index_state["vector"] in {"排队中", "构建中"} or index_state["bm25"] in {"排队中", "构建中"}
     st.markdown('<span id="pm-qa-anchor" class="pm-qa-anchor"></span>', unsafe_allow_html=True)
-    header_cols = st.columns([0.48, 0.16, 0.36], gap="small", vertical_alignment="center")
-    with header_cols[0]:
-        st.markdown('<h3 class="pm-section-title">Ask PaperMate</h3>', unsafe_allow_html=True)
-    with header_cols[1]:
-        if st.button("刷新", key=f"qa_refresh_index_state_{paper_id}", help="刷新索引状态", use_container_width=True):
-            refresh_index_status_for_paper(paper_id, rerun=False)
-            index_state = local_index_state(paper_id)
-            index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
-            index_busy = index_state["vector"] in {"排队中", "构建中"} or index_state["bm25"] in {"排队中", "构建中"}
-    with header_cols[2]:
+    with st.container(key="pm_qa_desktop_header"):
+        header_cols = st.columns([0.48, 0.16, 0.36], gap="small", vertical_alignment="center")
+        with header_cols[0]:
+            st.markdown('<h3 class="pm-section-title">Ask PaperMate</h3>', unsafe_allow_html=True)
+        with header_cols[1]:
+            if st.button("刷新", key=f"qa_refresh_index_state_{paper_id}", help="刷新索引状态", use_container_width=True):
+                refresh_index_status_for_paper(paper_id, rerun=False)
+                index_state = local_index_state(paper_id)
+                index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
+                index_busy = index_state["vector"] in {"排队中", "构建中"} or index_state["bm25"] in {"排队中", "构建中"}
+        with header_cols[2]:
+            vector_badge = render_status_badge(
+                f"向量 {index_state['vector']}",
+                index_status_type(index_state["vector"]),
+            )
+            bm25_badge = render_status_badge(
+                f"BM25 {index_state['bm25']}",
+                index_status_type(index_state["bm25"]),
+            )
+            st.markdown(
+                f'<div class="pm-badges pm-ask-badges-inline">{vector_badge}{bm25_badge}</div>',
+                unsafe_allow_html=True,
+            )
+
+    with st.container(key="pm_qa_mobile_header"):
         vector_badge = render_status_badge(
             f"向量 {index_state['vector']}",
             index_status_type(index_state["vector"]),
@@ -2848,9 +2910,19 @@ def render_qa_box(paper_id: str) -> None:
             index_status_type(index_state["bm25"]),
         )
         st.markdown(
-            f'<div class="pm-badges pm-ask-badges-inline">{vector_badge}{bm25_badge}</div>',
+            f"""
+            <div class="pm-panel">
+              <h3 class="pm-section-title">Ask PaperMate</h3>
+              <div class="pm-toolbar" style="margin-top:10px;">{vector_badge}{bm25_badge}</div>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
+        if st.button("刷新索引状态", key=f"qa_refresh_index_state_mobile_{paper_id}", help="刷新索引状态", use_container_width=True):
+            refresh_index_status_for_paper(paper_id, rerun=False)
+            index_state = local_index_state(paper_id)
+            index_ready = index_state["vector"] == "已构建" or index_state["bm25"] == "已构建"
+            index_busy = index_state["vector"] in {"排队中", "构建中"} or index_state["bm25"] in {"排队中", "构建中"}
 
     if not index_ready:
         render_empty_state(
@@ -2891,12 +2963,23 @@ def render_qa_box(paper_id: str) -> None:
         "有哪些局限性？",
         "帮我总结创新点",
     ]
-    quick_cols = st.columns([1, 1, 1])
-    for index, quick_question in enumerate(quick_questions):
-        with quick_cols[index % 3]:
+    with st.container(key="pm_qa_desktop_quick"):
+        quick_cols = st.columns([1, 1, 1])
+        for index, quick_question in enumerate(quick_questions):
+            with quick_cols[index % 3]:
+                if st.button(
+                    quick_question,
+                    key=f"quick_question_{paper_id}_{index}",
+                    use_container_width=True,
+                ):
+                    st.session_state[f"question_{paper_id}"] = quick_question
+
+    with st.container(key="pm_qa_mobile_quick"):
+        st.caption("快捷问题")
+        for index, quick_question in enumerate(quick_questions):
             if st.button(
                 quick_question,
-                key=f"quick_question_{paper_id}_{index}",
+                key=f"quick_question_mobile_{paper_id}_{index}",
                 use_container_width=True,
             ):
                 st.session_state[f"question_{paper_id}"] = quick_question
@@ -2944,7 +3027,7 @@ def render_qa_box(paper_id: str) -> None:
         render_chat_message("assistant", qa_record["answer"])
         if needs_index_warning(qa_record.get("retrieval_details", {})):
             st.warning("请先构建论文索引后再提问。")
-        render_citations(qa_record["citations"])
+        render_citations(qa_record["citations"], expanded=False)
         render_retrieval_details(qa_record.get("retrieval_details", {}))
         render_source_chunks(qa_record["source_chunks"])
         render_feedback_form(qa_record)
@@ -3373,6 +3456,68 @@ def inject_global_css() -> None:
         .pm-badge-success { background: #F0FDF4; color: #15803D; border-color: #BBF7D0; }
         .pm-badge-warning { background: #FFFBEB; color: #B45309; border-color: #FDE68A; }
         .pm-badge-danger { background: #FEF2F2; color: #B91C1C; border-color: #FECACA; }
+        .pm-mobile-only {
+          display: none;
+        }
+        .pm-mobile-jumpbar {
+          position: sticky;
+          top: 8px;
+          z-index: 30;
+          display: none;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 7px;
+          margin: 0 0 12px;
+          padding: 8px;
+          border: 1px solid var(--pm-border);
+          border-radius: 16px;
+          background: rgba(255,255,255,.94);
+          box-shadow: var(--pm-shadow-soft);
+          backdrop-filter: blur(12px);
+        }
+        .pm-mobile-jumpbar a {
+          display: inline-flex;
+          justify-content: center;
+          align-items: center;
+          min-height: 34px;
+          border-radius: 11px;
+          background: #F8FAFC;
+          color: var(--pm-text);
+          font-size: 12px;
+          font-weight: 850;
+          text-decoration: none;
+        }
+        .pm-mobile-paper-card {
+          border: 1px solid var(--pm-border);
+          border-radius: 16px;
+          background: rgba(255,255,255,.92);
+          box-shadow: var(--pm-shadow-soft);
+          padding: 13px;
+          margin: 10px 0 8px;
+        }
+        .pm-mobile-paper-card-selected {
+          border-color: rgba(79,70,229,.48);
+          box-shadow: 0 0 0 4px rgba(79,70,229,.08), var(--pm-shadow-soft);
+        }
+        .pm-mobile-paper-title {
+          color: var(--pm-text);
+          font-size: 15px;
+          font-weight: 850;
+          line-height: 1.38;
+          word-break: break-word;
+          margin-bottom: 7px;
+        }
+        .pm-mobile-paper-meta {
+          color: var(--pm-muted);
+          font-size: 12px;
+          line-height: 1.55;
+          margin-bottom: 9px;
+        }
+        .pm-reader-anchor,
+        .pm-upload-anchor {
+          display: block;
+          height: 1px;
+          scroll-margin-top: 18px;
+        }
         .pm-queue-bar {
           position: fixed;
           top: 92px;
@@ -3533,66 +3678,96 @@ def inject_global_css() -> None:
           line-height: 1.45;
           padding: 10px;
         }
-        .pm-queue-popover {
-          display: none;
-          position: absolute;
-          left: 0;
-          right: 0;
-          top: calc(100% + 8px);
-          width: auto;
-          max-height: calc(100vh - 330px);
+        .st-key-pm_queue_manager_controls {
+          position: fixed;
+          top: 286px;
+          right: 22px;
+          width: 276px;
+          min-width: 0;
+          z-index: 1000000;
+        }
+        .st-key-pm_queue_manager_controls button {
+          min-height: 34px;
+          border-radius: 12px;
+          font-weight: 850;
+        }
+        .st-key-pm_queue_manager_panel {
+          max-height: min(56vh, 520px);
           overflow-y: auto;
-          z-index: 50;
           border: 1px solid var(--pm-border);
           border-radius: 14px;
           background: rgba(255,255,255,.98);
           box-shadow: 0 18px 45px rgba(15,23,42,.14);
           padding: 11px;
+          margin-top: 8px;
           backdrop-filter: blur(12px);
         }
-        .pm-queue-bar:hover .pm-queue-popover {
-          display: block;
+        .pm-queue-manager-section + .pm-queue-manager-section {
+          margin-top: 12px;
+          padding-top: 10px;
+          border-top: 1px solid #EEF2F7;
         }
-        .pm-queue-popover-title {
-          color: var(--pm-muted);
+        .pm-queue-manager-section-title {
+          color: var(--pm-text);
           font-size: 12px;
           font-weight: 850;
           margin-bottom: 7px;
         }
-        .pm-queue-row {
+        .pm-queue-manager-row {
+          position: relative;
           display: grid;
-          grid-template-columns: 64px minmax(0, 1fr) 88px;
+          grid-template-columns: 46px minmax(0, 1fr) auto;
           gap: 8px;
           align-items: center;
-          position: relative;
-          padding: 8px 0;
-          padding-right: 24px;
-          border-top: 1px solid #EEF2F7;
+          min-height: 36px;
+          padding: 7px 28px 7px 8px;
+          border: 1px solid transparent;
+          border-radius: 10px;
+          color: var(--pm-text);
           font-size: 12px;
         }
-        .pm-queue-row:first-of-type {
-          border-top: 0;
+        .pm-queue-manager-row + .pm-queue-manager-row {
+          margin-top: 5px;
         }
-        .pm-queue-type {
+        .pm-queue-manager-row-running {
+          background: #F8FFFD;
+          border-color: rgba(20,184,166,.20);
+        }
+        .pm-queue-manager-row-queued {
+          background: #F8FAFF;
+          border-color: rgba(79,70,229,.16);
+        }
+        .pm-queue-manager-row:hover {
+          border-color: rgba(148,163,184,.42);
+          background: #FFFFFF;
+        }
+        .pm-queue-manager-id {
           color: #0E7490;
           font-weight: 850;
+          white-space: nowrap;
         }
-        .pm-queue-paper {
+        .pm-queue-manager-paper {
           min-width: 0;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
-          color: var(--pm-text);
           font-weight: 750;
         }
-        .pm-queue-meta {
+        .pm-queue-manager-meta {
           color: var(--pm-muted);
-          text-align: right;
+          font-size: 11px;
           white-space: nowrap;
         }
-        .pm-queue-remove {
+        .pm-queue-manager-reason {
+          display: block;
+          color: #B45309;
+          font-size: 10px;
+          margin-top: 1px;
+          text-align: right;
+        }
+        .pm-queue-manager-delete {
           position: absolute;
-          right: 0;
+          right: 6px;
           top: 50%;
           transform: translateY(-50%);
           display: inline-flex;
@@ -3612,23 +3787,22 @@ def inject_global_css() -> None:
           pointer-events: none;
           transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
         }
-        .pm-queue-row:hover .pm-queue-remove {
+        .pm-queue-manager-row:hover .pm-queue-manager-delete {
           opacity: 1;
           pointer-events: auto;
         }
-        .pm-queue-remove:hover {
+        .pm-queue-manager-delete:hover {
           color: #B91C1C;
           background: #FEE2E2;
           border-color: rgba(248,113,113,.56);
         }
-        .pm-queue-empty, .pm-queue-more {
+        .pm-queue-manager-empty {
           color: var(--pm-muted);
           font-size: 12px;
-          padding: 8px 0 2px;
-        }
-        .pm-queue-more {
-          border-top: 1px solid #EEF2F7;
-          margin-top: 2px;
+          padding: 7px 8px;
+          border: 1px dashed rgba(148,163,184,.34);
+          border-radius: 10px;
+          background: rgba(248,250,252,.74);
         }
         @media (min-width: 1180px) {
           .stApp:has(.pm-queue-bar) .block-container {
@@ -3640,19 +3814,27 @@ def inject_global_css() -> None:
             left: 10px;
             right: 10px;
             top: auto;
+            bottom: 62px;
+            width: auto;
+          }
+          .st-key-pm_queue_manager_controls {
+            left: 10px;
+            right: 10px;
+            top: auto;
             bottom: 14px;
             width: auto;
           }
-          .pm-queue-popover {
-            left: 0;
-            right: 0;
-            top: auto;
-            bottom: calc(100% + 8px);
-            width: auto;
-            max-height: 48vh;
+          .st-key-pm_queue_manager_panel {
+            max-height: 42vh;
           }
-          .pm-queue-row {
-            grid-template-columns: 52px minmax(0, 1fr) 64px;
+          .pm-queue-manager-row {
+            grid-template-columns: 44px minmax(0, 1fr);
+          }
+          .pm-queue-manager-meta {
+            grid-column: 1 / -1;
+          }
+          .pm-queue-manager-reason {
+            text-align: left;
           }
         }
         .pm-sidebar-brand, .pm-user-pill, .pm-sidebar-footer {
@@ -4254,6 +4436,112 @@ def inject_global_css() -> None:
             padding-right: 16px;
           }
         }
+        @media (min-width: 761px) {
+          .st-key-pm_paper_library_mobile_list,
+          .st-key-pm_card_library_mobile_selected,
+          .st-key-pm_qa_mobile_header,
+          .st-key-pm_qa_mobile_quick {
+            display: none !important;
+          }
+        }
+        @media (max-width: 760px) {
+          .block-container {
+            padding: 0.72rem 0.75rem 6.8rem;
+          }
+          .pm-mobile-only {
+            display: block;
+          }
+          .pm-mobile-jumpbar {
+            display: grid;
+          }
+          .st-key-pm_paper_library_desktop_table,
+          .st-key-pm_card_library_desktop_list,
+          .st-key-pm_qa_desktop_header,
+          .st-key-pm_qa_desktop_quick {
+            display: none !important;
+          }
+          .st-key-pm_workspace_reader_qa_flow div[data-testid="stHorizontalBlock"] {
+            flex-direction: column;
+          }
+          .st-key-pm_workspace_reader_qa_flow div[data-testid="column"] {
+            width: 100% !important;
+            flex: 1 1 100% !important;
+          }
+          .pm-hero {
+            padding: 16px;
+            border-radius: 16px;
+            margin-bottom: 12px;
+          }
+          .pm-hero h1 {
+            font-size: 24px;
+          }
+          .pm-hero p {
+            font-size: 13px;
+            line-height: 1.55;
+          }
+          .pm-section-card,
+          .pm-panel,
+          .pm-detail-panel,
+          .pm-reference-card,
+          .pm-chat-message {
+            border-radius: 16px;
+            padding: 13px;
+          }
+          .pm-section-heading,
+          .pm-file-capsule,
+          .pm-interleaved-toolbar,
+          .pm-reference-head,
+          .pm-card-footer {
+            display: block;
+          }
+          .pm-badges,
+          .pm-toolbar,
+          .pm-chip-row {
+            gap: 6px;
+          }
+          .pm-badge {
+            font-size: 11px;
+            padding: 3px 8px;
+          }
+          .pm-metric-card {
+            min-height: auto;
+            padding: 12px;
+          }
+          .pm-metric-value {
+            font-size: 16px;
+          }
+          .pm-workflow {
+            gap: 7px;
+          }
+          .pm-step {
+            padding: 9px;
+            border-radius: 13px;
+          }
+          .pm-chat-message {
+            margin: 9px 0;
+          }
+          .pm-reference-text,
+          .pm-detail-section div,
+          .pm-block-content {
+            overflow-wrap: anywhere;
+          }
+          .pm-source-block,
+          .pm-target-block {
+            padding: 13px;
+            font-size: 14px;
+            line-height: 1.72;
+          }
+          .pm-bilingual-block {
+            border-radius: 14px;
+            margin-bottom: 12px;
+          }
+          .pm-bilingual-flow {
+            padding: 10px;
+          }
+          iframe.pm-pdf {
+            height: 58vh;
+          }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -4530,6 +4818,75 @@ def refresh_workspace_paper(processed_pdf: dict[str, Any]) -> tuple[dict[str, An
     return update_processed_pdf_metadata(processed_pdf, paper, signature=processed_pdf.get("signature")), paper
 
 
+def paper_parse_index_finished(paper: dict[str, Any] | None) -> bool:
+    """Return whether parse and index have both reached terminal states."""
+    if not paper:
+        return False
+    parse_status = str(paper.get("parse_status") or "").strip().lower()
+    index_status = str(paper.get("index_status") or "").strip().lower()
+    return parse_status in PAPER_PARSE_TERMINAL_STATUSES and index_status in PAPER_INDEX_TERMINAL_STATUSES
+
+
+def workspace_completion_refresh_needed(processed_pdf: dict[str, Any] | None, paper: dict[str, Any] | None) -> bool:
+    """Return whether the open workspace paper needs one auto-refresh after queue completion."""
+    if not processed_pdf or not paper_parse_index_finished(paper):
+        return False
+    paper_id = str(paper.get("paper_id") or "")
+    current_paper_id = str((processed_pdf.get("saved_file") or {}).get("paper_id") or "")
+    if not paper_id or current_paper_id != paper_id:
+        return False
+
+    parse_status = str(paper.get("parse_status") or "").strip().lower()
+    index_status = str(paper.get("index_status") or "").strip().lower()
+    cached_parse_status = current_parse_status(processed_pdf).strip().lower()
+    cached_index_status = str(processed_pdf.get("index_status") or "").strip().lower()
+    if cached_parse_status != parse_status or cached_index_status != index_status:
+        return True
+    if parse_status == "succeeded" and not processed_pdf.get("chunks"):
+        return True
+    return False
+
+
+def maybe_auto_refresh_workspace_after_completion(user_id: int) -> None:
+    """Refresh the open workspace paper once when parse and index finish in the background."""
+    current_page = str(st.session_state.get("pm_nav_page") or "")
+    if "论文工作台" not in current_page:
+        return
+    processed_pdf = st.session_state.get("processed_pdf")
+    paper_id = str((processed_pdf or {}).get("saved_file", {}).get("paper_id") or "")
+    if not processed_pdf or not paper_id:
+        return
+
+    try:
+        paper = get_accessible_paper(paper_id, int(user_id))
+    except Exception:
+        logger.exception("Workspace completion auto-refresh status lookup failed. paper_id=%s", paper_id)
+        return
+    if not workspace_completion_refresh_needed(processed_pdf, paper):
+        return
+
+    refresh_key = f"pm_workspace_completion_refresh_{paper_id}"
+    completion_signature = "|".join(
+        [
+            paper_id,
+            str((paper or {}).get("parse_status") or ""),
+            str((paper or {}).get("index_status") or ""),
+            str((paper or {}).get("updated_at") or ""),
+        ]
+    )
+    if st.session_state.get(refresh_key) == completion_signature:
+        return
+
+    st.session_state.pop(f"index_state_{paper_id}", None)
+    try:
+        refresh_workspace_paper(processed_pdf)
+    except Exception:
+        logger.exception("Workspace completion auto-refresh failed. paper_id=%s", paper_id)
+        return
+    st.session_state[refresh_key] = completion_signature
+    st.rerun()
+
+
 def save_uploaded_pdf_to_library(
     uploaded_file: UploadedFile,
     team_id: int,
@@ -4728,6 +5085,54 @@ def render_delete_papers_dialog(team_id: int, paper_ids: list[str], file_names: 
             st.rerun()
 
 
+def stable_widget_suffix(value: Any) -> str:
+    """Return a short suffix safe for dynamically keyed widgets."""
+    return hashlib.sha1(str(value).encode("utf-8")).hexdigest()[:12]
+
+
+def paper_job_status_type(status: str) -> str:
+    """Map persisted paper job status values to badge styles."""
+    if status == "succeeded":
+        return "success"
+    if status == "failed":
+        return "danger"
+    if status in {"queued", "running"}:
+        return "warning"
+    return "default"
+
+
+def render_mobile_paper_card(paper: dict[str, Any], selected: bool = False) -> None:
+    """Render a compact paper card for narrow screens."""
+    parse_status = str(paper.get("parse_status") or "unknown")
+    index_status = str(paper.get("index_status") or "unknown")
+    translation_status = str(paper.get("translation_status") or "unknown")
+    selected_class = " pm-mobile-paper-card-selected" if selected else ""
+    badges = "".join(
+        [
+            render_status_badge(f"解析 {parse_status}", paper_job_status_type(parse_status)),
+            render_status_badge(f"索引 {index_status}", paper_job_status_type(index_status)),
+            render_status_badge(f"翻译 {translation_status}", paper_job_status_type(translation_status)),
+        ]
+    )
+    meta_items = [
+        str(paper.get("project_name") or "未分组"),
+        str(paper.get("owner_username") or "未知上传人"),
+        f"Chunks {paper.get('chunk_count') or 0}",
+    ]
+    if paper.get("updated_at"):
+        meta_items.append(str(paper["updated_at"]))
+    st.markdown(
+        f"""
+        <div class="pm-mobile-paper-card{selected_class}">
+          <div class="pm-mobile-paper-title">{html.escape(str(paper.get("file_name") or paper.get("paper_id") or "未命名论文"))}</div>
+          <div class="pm-mobile-paper-meta">{html.escape(" · ".join(meta_items))}</div>
+          <div class="pm-badges">{badges}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_paper_library_page() -> None:
     """Render the team-scoped paper library."""
     team_context = current_team_context()
@@ -4854,62 +5259,126 @@ def render_paper_library_page() -> None:
         }
         for paper in papers
     ]
-    toolbar_cols = st.columns([0.24, 0.52, 0.24], gap="small")
-    with toolbar_cols[0]:
-        multi_select_enabled = st.toggle(
-            "多选",
-            value=False,
-            key="paper_library_multi_select",
-            disabled=not can_edit,
-            help="开启后可以一次选择多篇论文；关闭时为单篇选择。",
-        )
-    table_key = "paper_library_table_multi" if multi_select_enabled else "paper_library_table_single"
-    selection_mode = "multi-row" if multi_select_enabled else "single-row"
-    selected_rows_before = dataframe_selected_rows(table_key)
-    selected_paper_ids_before = [
-        str(papers[row_index]["paper_id"])
-        for row_index in selected_rows_before
-        if 0 <= row_index < len(papers)
-    ]
-    selected_file_names_before = [
-        str(papers[row_index].get("file_name") or papers[row_index]["paper_id"])
-        for row_index in selected_rows_before
-        if 0 <= row_index < len(papers)
-    ]
-    with toolbar_cols[1]:
-        selected_count = len(selected_paper_ids_before)
-        st.caption(
-            f"已选 {selected_count} 篇；点击行可预览 PDF，并手动选择解析或索引任务。"
-            if selected_count
-            else "点击行可预览 PDF；开启多选后可批量选择论文。"
-        )
-    with toolbar_cols[2]:
-        if st.button(
-            "删除选中论文",
-            type="primary",
-            use_container_width=True,
-            disabled=not can_edit or not selected_paper_ids_before,
-            key="delete_selected_papers_toolbar",
-        ):
-            render_delete_papers_dialog(team_id, selected_paper_ids_before, selected_file_names_before)
-
-    table_state = st.dataframe(
-        table_rows,
-        use_container_width=True,
-        hide_index=True,
-        key=table_key,
-        on_select="rerun",
-        selection_mode=selection_mode,
-        column_config={
-            "PDF": st.column_config.TextColumn("PDF", help="点击论文行后，下方会预览第一篇选中论文的原始 PDF。"),
-        },
-    )
     selected_rows = []
-    try:
-        selected_rows = [int(row) for row in table_state.selection.rows]
-    except AttributeError:
-        if isinstance(table_state, dict):
-            selected_rows = [int(row) for row in table_state.get("selection", {}).get("rows", [])]
+    with st.container(key="pm_paper_library_desktop_table"):
+        toolbar_cols = st.columns([0.24, 0.52, 0.24], gap="small")
+        with toolbar_cols[0]:
+            multi_select_enabled = st.toggle(
+                "多选",
+                value=False,
+                key="paper_library_multi_select",
+                disabled=not can_edit,
+                help="开启后可以一次选择多篇论文；关闭时为单篇选择。",
+            )
+        table_key = "paper_library_table_multi" if multi_select_enabled else "paper_library_table_single"
+        selection_mode = "multi-row" if multi_select_enabled else "single-row"
+        selected_rows_before = dataframe_selected_rows(table_key)
+        selected_paper_ids_before = [
+            str(papers[row_index]["paper_id"])
+            for row_index in selected_rows_before
+            if 0 <= row_index < len(papers)
+        ]
+        selected_file_names_before = [
+            str(papers[row_index].get("file_name") or papers[row_index]["paper_id"])
+            for row_index in selected_rows_before
+            if 0 <= row_index < len(papers)
+        ]
+        with toolbar_cols[1]:
+            selected_count = len(selected_paper_ids_before)
+            st.caption(
+                f"已选 {selected_count} 篇；点击行可预览 PDF，并手动选择解析或索引任务。"
+                if selected_count
+                else "点击行可预览 PDF；开启多选后可批量选择论文。"
+            )
+        with toolbar_cols[2]:
+            if st.button(
+                "删除选中论文",
+                type="primary",
+                use_container_width=True,
+                disabled=not can_edit or not selected_paper_ids_before,
+                key="delete_selected_papers_toolbar",
+            ):
+                render_delete_papers_dialog(team_id, selected_paper_ids_before, selected_file_names_before)
+
+        table_state = st.dataframe(
+            table_rows,
+            use_container_width=True,
+            hide_index=True,
+            key=table_key,
+            on_select="rerun",
+            selection_mode=selection_mode,
+            column_config={
+                "PDF": st.column_config.TextColumn("PDF", help="点击论文行后，下方会预览第一篇选中论文的原始 PDF。"),
+            },
+        )
+        try:
+            selected_rows = [int(row) for row in table_state.selection.rows]
+        except AttributeError:
+            if isinstance(table_state, dict):
+                selected_rows = [int(row) for row in table_state.get("selection", {}).get("rows", [])]
+
+    with st.container(key="pm_paper_library_mobile_list"):
+        st.caption(f"当前显示 {len(papers)} 篇论文")
+        remembered_id = str(st.session_state.get("paper_library_selected_paper_id") or "")
+        for paper in papers:
+            paper_id = str(paper["paper_id"])
+            paper_key = stable_widget_suffix(paper_id)
+            parse_status = str(paper.get("parse_status") or "")
+            index_status = str(paper.get("index_status") or "")
+            render_mobile_paper_card(paper, selected=paper_id == remembered_id)
+            action_cols = st.columns([0.5, 0.5], gap="small")
+            with action_cols[0]:
+                if st.button("选择预览", key=f"mobile_select_paper_{paper_key}", use_container_width=True):
+                    st.session_state["paper_library_selected_paper_id"] = paper_id
+                    st.rerun()
+            with action_cols[1]:
+                if st.button(
+                    "打开工作台",
+                    key=f"mobile_open_paper_{paper_key}",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=parse_status != "succeeded",
+                ):
+                    fresh_paper = get_accessible_paper(paper_id, current_user_id())
+                    if not fresh_paper:
+                        render_error_card("无法打开论文", "当前用户没有访问这篇论文的权限。")
+                        return
+                    load_paper_into_workspace(fresh_paper)
+                    navigate_to_page("📄 论文工作台")
+            if can_edit:
+                task_cols = st.columns([0.5, 0.5], gap="small")
+                with task_cols[0]:
+                    if st.button(
+                        "解析",
+                        key=f"mobile_parse_paper_{paper_key}",
+                        use_container_width=True,
+                        disabled=parse_status in {"queued", "running"},
+                    ):
+                        try:
+                            result = enqueue_paper_parse(paper_id, include_images=False)
+                            st.session_state["pm_library_notice"] = result["message"]
+                            st.rerun()
+                        except Exception as exc:
+                            logger.exception("Mobile library parse enqueue failed. paper_id=%s", paper_id)
+                            render_error_card("解析任务创建失败", "请检查团队权限、任务队列和 SQLite 写入状态。", str(exc))
+                with task_cols[1]:
+                    if st.button(
+                        "索引",
+                        key=f"mobile_index_paper_{paper_key}",
+                        use_container_width=True,
+                        disabled=parse_status != "succeeded" or index_status in {"queued", "running"},
+                    ):
+                        try:
+                            job_id, reused_existing = enqueue_index_build_for_paper(paper_id)
+                            st.session_state["pm_library_notice"] = (
+                                f"索引任务已在队列中：#{job_id}。"
+                                if reused_existing
+                                else f"索引任务已入队：#{job_id}。"
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            logger.exception("Mobile library index enqueue failed. paper_id=%s", paper_id)
+                            render_error_card("索引任务创建失败", "请检查解析状态、团队权限和数据库状态。", str(exc))
 
     selected_paper: dict[str, Any] | None = None
     selected_paper_ids = [
@@ -5129,9 +5598,21 @@ def render_workspace_page() -> None:
             {"title": "生成卡片", "helper": "沉淀研究笔记", "status": "done" if card_done else ("active" if qa_done else "pending")},
         ]
     )
+    st.markdown(
+        """
+        <div class="pm-mobile-only pm-mobile-jumpbar">
+          <a href="#pm-upload-anchor">上传</a>
+          <a href="#pm-status-anchor">状态</a>
+          <a href="#pm-reader-anchor">阅读</a>
+          <a href="#pm-qa-anchor">问答</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     saved_file = processed_pdf.get("saved_file", {}) if processed_pdf else {}
     chunks = processed_pdf.get("chunks", []) if processed_pdf else []
+    st.markdown('<span id="pm-status-anchor" class="pm-upload-anchor"></span>', unsafe_allow_html=True)
     metric_cols = st.columns(5)
     with metric_cols[0]:
         render_metric_card("当前论文", saved_file.get("file_name") or "未上传", "上传 PDF 后自动排队", icon="PDF")
@@ -5144,6 +5625,7 @@ def render_workspace_page() -> None:
     with metric_cols[4]:
         render_metric_card("BM25 状态", index_state["bm25"], "关键词精确检索", icon="B", status=index_status_type(index_state["bm25"]))
 
+    st.markdown('<span id="pm-upload-anchor" class="pm-upload-anchor"></span>', unsafe_allow_html=True)
     render_section_card("上传与解析", "拖拽或选择一篇 PDF。论文会立即进入论文库，并自动加入解析和索引队列；worker 完成后可继续阅读、问答和生成卡片。")
     workspace_notice = st.session_state.pop("pm_workspace_notice", None)
     if workspace_notice:
@@ -5238,17 +5720,18 @@ def render_workspace_page() -> None:
     render_index_builder(processed_pdf["chunks"])
 
     st.divider()
-    left_col, right_col = st.columns([0.60, 0.40], gap="large")
-    with left_col:
-        render_markdown_document(processed_pdf)
-    with right_col:
-        render_qa_box(processed_pdf["saved_file"]["paper_id"])
-        render_literature_card_save(
-            processed_pdf["saved_file"]["paper_id"],
-            processed_pdf["chunks"],
-            processed_pdf["db_save_failed"],
-            current_user_id(),
-        )
+    with st.container(key="pm_workspace_reader_qa_flow"):
+        left_col, right_col = st.columns([0.60, 0.40], gap="large")
+        with left_col:
+            render_markdown_document(processed_pdf)
+        with right_col:
+            render_qa_box(processed_pdf["saved_file"]["paper_id"])
+            render_literature_card_save(
+                processed_pdf["saved_file"]["paper_id"],
+                processed_pdf["chunks"],
+                processed_pdf["db_save_failed"],
+                current_user_id(),
+            )
 
 
 def render_literature_card(card: dict[str, Any], selected: bool = False) -> None:
@@ -5436,17 +5919,22 @@ def render_card_library_page(user_id: int) -> None:
         format_func=lambda card_id: card_option_label(next(card for card in cards if int(card["card_id"]) == int(card_id))),
     )
     st.session_state["selected_literature_card_id_tidy"] = int(selected_card_id)
+    selected_card = get_literature_card(int(selected_card_id), team_id=team_id)
+    if not selected_card:
+        render_empty_state("没有找到选中的卡片", "请重新选择一张文献卡片。", icon="CARD")
+        return
+
+    with st.container(key="pm_card_library_mobile_selected"):
+        st.caption("当前卡片")
+        render_literature_card(selected_card, selected=True)
 
     list_col, detail_col = st.columns([0.42, 0.58], gap="large")
     with list_col:
-        st.caption(f"当前显示 {len(cards)} 张卡片")
-        for card in cards:
-            render_literature_card(card, selected=int(card["card_id"]) == int(selected_card_id))
+        with st.container(key="pm_card_library_desktop_list"):
+            st.caption(f"当前显示 {len(cards)} 张卡片")
+            for card in cards:
+                render_literature_card(card, selected=int(card["card_id"]) == int(selected_card_id))
     with detail_col:
-        selected_card = get_literature_card(int(selected_card_id), team_id=team_id)
-        if not selected_card:
-            render_empty_state("没有找到选中的卡片", "请重新选择一张文献卡片。", icon="CARD")
-            return
         tab_card, tab_edit, tab_pdf = st.tabs(["详情", "编辑", "原 PDF"])
         with tab_card:
             render_literature_detail(selected_card, mode="preview")
@@ -6095,6 +6583,7 @@ def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
     """Render original, Chinese, or interleaved bilingual Markdown for reading."""
     parsed_pdf = processed_pdf["parsed_pdf"]
     paper_id = processed_pdf["saved_file"]["paper_id"]
+    st.markdown('<span id="pm-reader-anchor" class="pm-reader-anchor"></span>', unsafe_allow_html=True)
     source_markdown, markdown_path = read_original_markdown(processed_pdf)
     if not source_markdown.strip():
         render_empty_state("还没有可阅读的论文正文", "请先上传 PDF 并完成解析。", icon="MD")
@@ -6109,11 +6598,50 @@ def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
     if st.session_state.get("pm_pending_source_anchor"):
         st.session_state["reading_mode"] = SOURCE_READING_MODE
 
-    reading_mode = render_segmented_choice("阅读模式", ["原文", "中文译文", "双语对照"], "reading_mode", "原文")
     align_label = st.session_state.get("bilingual_align_mode")
     if align_label not in {"章节对齐", "段落对齐"}:
         st.session_state["bilingual_align_mode"] = "章节对齐"
         align_label = "章节对齐"
+
+    with st.expander("阅读工具", expanded=False):
+        reading_mode = render_segmented_choice("阅读模式", ["原文", "中文译文", "双语对照"], "reading_mode", "原文")
+        if reading_mode == "双语对照":
+            align_label = render_segmented_choice(
+                "双语对齐方式",
+                ["章节对齐", "段落对齐"],
+                "bilingual_align_mode",
+                "章节对齐",
+            )
+
+        if markdown_path:
+            action_cols = st.columns(3, gap="small")
+            with action_cols[0]:
+                render_reader_translation_button(processed_pdf, markdown_path, zh_path or translated_markdown_output_path(markdown_path), zh_exists)
+            with action_cols[1]:
+                st.download_button(
+                    "下载原文 Markdown",
+                    data=markdown_path.read_bytes() if markdown_path.exists() else source_markdown.encode("utf-8"),
+                    file_name=markdown_path.name,
+                    mime="text/markdown",
+                    use_container_width=True,
+                    key=f"download_source_markdown_reader_{paper_id}",
+                )
+            with action_cols[2]:
+                if zh_exists and zh_path:
+                    parsed_pdf["translated_markdown_path"] = str(zh_path.resolve())
+                    st.download_button(
+                        "下载中文译文",
+                        data=zh_path.read_bytes(),
+                        file_name=zh_path.name,
+                        mime="text/markdown",
+                        use_container_width=True,
+                        key=f"download_zh_markdown_reader_{paper_id}",
+                    )
+                else:
+                    st.button("下载中文译文", disabled=True, use_container_width=True, key=f"download_zh_disabled_{paper_id}")
+
+    reading_mode = str(st.session_state.get("reading_mode") or "原文")
+    align_label = str(st.session_state.get("bilingual_align_mode") or "章节对齐")
     align_mode = "section" if align_label == "章节对齐" else "paragraph"
 
     mode_badge_type = {"原文": "primary", "中文译文": "success", "双语对照": "info"}.get(reading_mode, "default")
@@ -6138,42 +6666,6 @@ def render_markdown_document(processed_pdf: dict[str, Any]) -> None:
         ),
         unsafe_allow_html=True,
     )
-
-    if reading_mode == "双语对照":
-        align_label = render_segmented_choice(
-            "双语对齐方式",
-            ["章节对齐", "段落对齐"],
-            "bilingual_align_mode",
-            "章节对齐",
-        )
-        align_mode = "section" if align_label == "章节对齐" else "paragraph"
-
-    if markdown_path:
-        action_cols = st.columns(3, gap="small")
-        with action_cols[0]:
-            render_reader_translation_button(processed_pdf, markdown_path, zh_path or translated_markdown_output_path(markdown_path), zh_exists)
-        with action_cols[1]:
-            st.download_button(
-                "下载原文 Markdown",
-                data=markdown_path.read_bytes() if markdown_path.exists() else source_markdown.encode("utf-8"),
-                file_name=markdown_path.name,
-                mime="text/markdown",
-                use_container_width=True,
-                key=f"download_source_markdown_reader_{paper_id}",
-            )
-        with action_cols[2]:
-            if zh_exists and zh_path:
-                parsed_pdf["translated_markdown_path"] = str(zh_path.resolve())
-                st.download_button(
-                    "下载中文译文",
-                    data=zh_path.read_bytes(),
-                    file_name=zh_path.name,
-                    mime="text/markdown",
-                    use_container_width=True,
-                    key=f"download_zh_markdown_reader_{paper_id}",
-                )
-            else:
-                st.button("下载中文译文", disabled=True, use_container_width=True, key=f"download_zh_disabled_{paper_id}")
 
     if reading_mode in {"中文译文", "双语对照"} and (not zh_exists or zh_path is None):
         render_empty_state(
@@ -6240,7 +6732,7 @@ def render_app() -> None:
         render_auth_page()
         return
 
-    handle_queue_cancel_query(int(user["user_id"]))
+    handle_queue_delete_query(int(user["user_id"]))
     prepare_user_workspace_once(int(user["user_id"]))
     page = render_sidebar_navigation(user)
     team_context = current_team_context()

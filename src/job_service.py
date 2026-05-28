@@ -137,7 +137,7 @@ def queue_progress_summary(
             WHERE j.team_id = ?
                 AND j.job_type IN ({placeholders})
                 AND j.status = 'queued'
-            ORDER BY j.created_at ASC, j.job_id ASC
+            ORDER BY j.job_id ASC
             LIMIT ?
             """,
             [int(team_id), *clean_types, max(1, int(queued_limit))],
@@ -156,10 +156,29 @@ def queue_progress_summary(
             WHERE j.team_id = ?
                 AND j.job_type IN ({placeholders})
                 AND j.status = 'queued'
-            ORDER BY j.created_at ASC, j.job_id ASC
+            ORDER BY j.job_id ASC
             LIMIT ?
             """,
             [int(team_id), *clean_types, max(100, int(queued_limit))],
+        ).fetchall()
+        active_rows = connection.execute(
+            f"""
+            SELECT
+                j.*,
+                p.file_name,
+                p.parse_status AS paper_parse_status,
+                p.index_status AS paper_index_status,
+                u.username
+            FROM jobs j
+            LEFT JOIN papers p ON p.paper_id = j.paper_id
+            LEFT JOIN users u ON u.user_id = j.user_id
+            WHERE j.team_id = ?
+                AND j.job_type IN ({placeholders})
+                AND j.status IN ('queued', 'running')
+            ORDER BY j.job_id ASC
+            LIMIT ?
+            """,
+            [int(team_id), *clean_types, max(1, int(queued_limit))],
         ).fetchall()
         count_rows = connection.execute(
             f"""
@@ -176,6 +195,7 @@ def queue_progress_summary(
     running = [normalize_job_row(dict(row)) for row in running_rows]
     queued = [normalize_job_row(dict(row)) for row in queued_rows]
     queued_candidates = [normalize_job_row(dict(row)) for row in queued_candidate_rows]
+    active_jobs = [normalize_job_row(dict(row)) for row in active_rows]
     counts = {str(row["status"]): int(row["count"]) for row in count_rows}
     running_by_type: dict[str, dict[str, Any]] = {}
     for job in running:
@@ -202,6 +222,7 @@ def queue_progress_summary(
 
     queued = [mark_queue_block_reason(job) for job in queued]
     queued_candidates = [mark_queue_block_reason(job) for job in queued_candidates]
+    active_jobs = [mark_queue_block_reason(job) for job in active_jobs]
     queued_by_type: dict[str, dict[str, Any]] = {}
     blocked_by_type: dict[str, dict[str, Any]] = {}
     for job in queued_candidates:
@@ -216,6 +237,7 @@ def queue_progress_summary(
         "running_by_type": running_by_type,
         "queued_by_type": queued_by_type,
         "blocked_by_type": blocked_by_type,
+        "active_jobs": active_jobs,
         "running_count": counts.get("running", 0),
         "queued_count": counts.get("queued", 0),
     }
@@ -416,7 +438,7 @@ def claim_next_job_for_worker(
             SELECT j.*
             FROM jobs j
             WHERE {' AND '.join(where_clauses)}
-            ORDER BY created_at ASC, job_id ASC
+            ORDER BY j.job_id ASC
             LIMIT 1
             """,
             parameters,

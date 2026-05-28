@@ -21,6 +21,7 @@ class FakeStreamlit:
     def __init__(self) -> None:
         self.session_state: dict[str, Any] = {}
         self.messages: list[str] = []
+        self.rerun_called = False
 
     def warning(self, message: str) -> None:
         self.messages.append(message)
@@ -34,11 +35,15 @@ class FakeStreamlit:
     def info(self, message: str) -> None:
         self.messages.append(message)
 
+    def rerun(self) -> None:
+        self.rerun_called = True
+
 
 def main() -> None:
     test_workspace_reload_decision()
     test_pdf_viewer_is_lazy_by_default()
-    test_queue_lane_states_show_running_and_waiting_content()
+    test_queue_lane_states_show_only_running_content_and_manager_rows()
+    test_workspace_auto_refreshes_once_when_parse_and_index_finish()
     test_index_state_prefers_fresh_database_status()
     test_upload_pipeline_enqueues_parse_and_waiting_index()
     print("ui nonblocking guard tests passed")
@@ -95,18 +100,22 @@ def test_pdf_viewer_is_lazy_by_default() -> None:
         assert any("点击后再读取" in message for message in fake_st.messages)
 
 
-def test_queue_lane_states_show_running_and_waiting_content() -> None:
+def test_queue_lane_states_show_only_running_content_and_manager_rows() -> None:
     running_job = {
         "job_id": 10,
         "job_type": "parse",
         "status": "running",
         "file_name": "running-paper.pdf",
+        "attempt_count": 1,
+        "max_attempts": 3,
     }
     queued_job = {
         "job_id": 11,
         "job_type": "parse",
         "status": "queued",
         "file_name": "queued-paper.pdf",
+        "attempt_count": 0,
+        "max_attempts": 3,
     }
     blocked_job = {
         "job_id": 12,
@@ -115,21 +124,79 @@ def test_queue_lane_states_show_running_and_waiting_content() -> None:
         "file_name": "waiting-index.pdf",
         "paper_id": "paper-12",
         "paper_parse_status": "running",
+        "queue_block_reason": "waiting_for_parse",
+        "attempt_count": 0,
+        "max_attempts": 3,
     }
 
     running_html = app.render_queue_lane("解析队列", running_job)
     queued_html = app.render_queue_lane("解析队列", queued_job)
     blocked_html = app.render_queue_lane("索引队列", blocked_job)
-    row_html = app.render_queue_rows([blocked_job], 1)
+    grouped = app.queue_jobs_by_type([running_job, queued_job, blocked_job])
+    manager_html = app.render_queue_manager_groups([running_job, queued_job, blocked_job])
 
     assert "running-paper.pdf" in running_html
     assert "运行中" in running_html
-    assert "queued-paper.pdf" in queued_html
-    assert "排队中" in queued_html
-    assert "waiting-index.pdf" in blocked_html
-    assert "等待解析完成" in blocked_html
-    assert "pm-queue-remove" in row_html
-    assert "pm_cancel_queue_job=12" in row_html
+    assert "queued-paper.pdf" not in queued_html
+    assert "waiting-index.pdf" not in blocked_html
+    assert "空闲" in queued_html
+    assert "空闲" in blocked_html
+    assert [int(job["job_id"]) for job in grouped["parse"]] == [10, 11]
+    assert [int(job["job_id"]) for job in grouped["index"]] == [12]
+    assert "解析任务" in manager_html
+    assert "索引任务" in manager_html
+    assert "pm_delete_queue_job=11" in manager_html
+    assert "pm_delete_queue_job=12" in manager_html
+    assert "pm_delete_queue_job=10" not in manager_html
+    assert "等待 PDF 解析完成" in manager_html
+
+
+def test_workspace_auto_refreshes_once_when_parse_and_index_finish() -> None:
+    fake_st = FakeStreamlit()
+    fake_st.session_state["pm_nav_page"] = "📄 论文工作台"
+    fake_st.session_state["processed_pdf"] = {
+        "saved_file": {"paper_id": "paper-done"},
+        "parse_status": "running",
+        "index_status": "queued",
+        "chunks": [],
+    }
+    fake_st.session_state["index_state_paper-done"] = {"vector": "排队中", "bm25": "排队中"}
+    completed_paper = {
+        "paper_id": "paper-done",
+        "parse_status": "succeeded",
+        "index_status": "succeeded",
+        "updated_at": "2026-05-28 20:00:00",
+    }
+    refresh_calls: list[str] = []
+
+    original_st = app.st
+    original_get_accessible_paper = app.get_accessible_paper
+    original_refresh_workspace_paper = app.refresh_workspace_paper
+    try:
+        app.st = fake_st
+        app.get_accessible_paper = lambda paper_id, user_id: completed_paper
+
+        def fake_refresh_workspace_paper(processed_pdf: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+            refresh_calls.append(str((processed_pdf.get("saved_file") or {}).get("paper_id") or ""))
+            processed_pdf["parse_status"] = "succeeded"
+            processed_pdf["index_status"] = "succeeded"
+            processed_pdf["chunks"] = [{"chunk_id": "paper-done:0000"}]
+            return processed_pdf, completed_paper
+
+        app.refresh_workspace_paper = fake_refresh_workspace_paper
+        app.maybe_auto_refresh_workspace_after_completion(7)
+        assert fake_st.rerun_called
+        assert refresh_calls == ["paper-done"]
+        assert "index_state_paper-done" not in fake_st.session_state
+
+        fake_st.rerun_called = False
+        app.maybe_auto_refresh_workspace_after_completion(7)
+        assert not fake_st.rerun_called
+        assert refresh_calls == ["paper-done"]
+    finally:
+        app.st = original_st
+        app.get_accessible_paper = original_get_accessible_paper
+        app.refresh_workspace_paper = original_refresh_workspace_paper
 
 
 def test_index_state_prefers_fresh_database_status() -> None:

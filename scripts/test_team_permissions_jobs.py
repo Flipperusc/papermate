@@ -158,10 +158,14 @@ def test_claim_next_job_type_lanes_and_paper_mutex() -> None:
             paper_b = f"paper-b-{suffix}"
             paper_c = f"paper-c-{suffix}"
             paper_d = f"paper-d-{suffix}"
+            paper_e = f"paper-e-{suffix}"
+            paper_f = f"paper-f-{suffix}"
             insert_test_paper(paper_a, int(owner["user_id"]), team_id, project_id)
             insert_test_paper(paper_b, int(owner["user_id"]), team_id, project_id)
             insert_test_paper(paper_c, int(owner["user_id"]), team_id, project_id, parse_status="running")
             insert_test_paper(paper_d, int(owner["user_id"]), team_id, project_id)
+            insert_test_paper(paper_e, int(owner["user_id"]), team_id, project_id)
+            insert_test_paper(paper_f, int(owner["user_id"]), team_id, project_id)
             parse_a_id = enqueue_job(
                 "parse",
                 user_id=int(owner["user_id"]),
@@ -218,10 +222,50 @@ def test_claim_next_job_type_lanes_and_paper_mutex() -> None:
             assert "recent" not in lane_summary
             assert int(lane_summary["blocked_by_type"]["index"]["job_id"]) in {index_a_id, index_c_id}
             assert int(lane_summary["queued_by_type"]["index"]["job_id"]) == index_d_id
+            assert [int(job["job_id"]) for job in lane_summary["active_jobs"]] == [
+                parse_a_id,
+                index_a_id,
+                index_c_id,
+                index_d_id,
+            ]
             claimed_next_index = claim_next_job(job_types=("index",))
             assert claimed_next_index is not None
             assert int(claimed_next_index["job_id"]) == index_d_id
             assert get_job(index_c_id)["status"] == "queued"
+
+            index_e_id = enqueue_job(
+                "index",
+                user_id=int(owner["user_id"]),
+                team_id=team_id,
+                project_id=project_id,
+                paper_id=paper_e,
+                payload={"paper_id": paper_e},
+            )
+            index_f_id = enqueue_job(
+                "index",
+                user_id=int(owner["user_id"]),
+                team_id=team_id,
+                project_id=project_id,
+                paper_id=paper_f,
+                payload={"paper_id": paper_f},
+            )
+            with get_db_connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET created_at = datetime(CURRENT_TIMESTAMP, '-1 hour')
+                    WHERE job_id = ?
+                    """,
+                    (index_f_id,),
+                )
+            claimed_by_job_id = claim_next_job(job_types=("index",))
+            assert claimed_by_job_id is not None
+            assert int(claimed_by_job_id["job_id"]) == index_e_id
+            complete_job(index_d_id, {"paper_id": paper_d})
+            complete_job(index_e_id, {"paper_id": paper_e})
+            claimed_final_index = claim_next_job(job_types=("index",))
+            assert claimed_final_index is not None
+            assert int(claimed_final_index["job_id"]) == index_f_id
             assert claim_next_job(job_types=("index",)) is None
         finally:
             object.__setattr__(db_module.settings, "db_path", original_db_path)
