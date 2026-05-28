@@ -30,6 +30,8 @@ services:
       - ./logs:/app/logs
     environment:
       PYTHONUNBUFFERED: "1"
+    healthcheck:
+      disable: true
     command: >
       sh -c "python scripts/init_db.py &&
       python scripts/worker.py"

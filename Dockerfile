@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY . .
 
-RUN mkdir -p data/uploads data/chroma_db data/mineru_outputs logs
+RUN mkdir -p data/uploads data/markdown data/chroma_db data/bm25 logs
 
 EXPOSE 8501
 
